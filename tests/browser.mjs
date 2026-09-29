@@ -1,0 +1,60 @@
+import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { mkdir } from 'node:fs/promises';
+
+const base = 'http://127.0.0.1:5187';
+const browser = await chromium.launch({ executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true });
+const desktop = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+const errors = [];
+const page = await desktop.newPage(), phone = await mobile.newPage();
+for (const p of [page, phone]) {
+  p.on('pageerror', error => errors.push(error.message));
+  await p.route('https://fonts.googleapis.com/**', route => route.abort());
+}
+const waitMoves = async (p, count) => p.waitForFunction(n => document.getElementById('move-count').textContent === `第 ${n} 手`, count);
+try {
+  await page.goto(base); await page.waitForFunction(() => document.getElementById('sync-status').textContent.includes('云端已同步'));
+  await page.locator('#new-button').click();
+  await page.locator('#new-mode').selectOption('local');
+  await page.locator('[name="size"][value="19"]').check({ force: true });
+  await page.locator('#new-form [type="submit"]').click(); await waitMoves(page, 0);
+  await page.waitForFunction(() => !document.getElementById('pass-button').disabled);
+  await mkdir('.artifacts', { recursive: true });
+  await page.screenshot({ path: '.artifacts/desktop.png', fullPage: true });
+  await phone.goto(base); await phone.waitForFunction(() => !document.getElementById('pass-button').disabled);
+  await page.locator('[data-index="60"]').click(); await waitMoves(page, 1);
+  await phone.reload(); await waitMoves(phone, 1);
+  assert.equal(await phone.locator('[data-index="60"] .stone.black').count(), 1);
+  await phone.locator('[data-index="300"]').tap(); await waitMoves(phone, 2);
+  await waitMoves(page, 2);
+  await page.reload(); await waitMoves(page, 2);
+  assert.equal(await page.locator('[data-index="300"] .stone.white').count(), 1);
+  await mobile.setOffline(true);
+  await phone.waitForFunction(() => document.getElementById('sync-status').textContent.includes('离线'));
+  assert.equal(await phone.locator('#pass-button').isDisabled(), true);
+  await mobile.setOffline(false); await phone.waitForFunction(() => !document.getElementById('pass-button').disabled);
+  await page.locator('#undo-button').click(); await waitMoves(page, 1); await waitMoves(phone, 1);
+  await page.locator('#pass-button').click(); await waitMoves(page, 2);
+  await page.locator('#pass-button').click(); await waitMoves(page, 3);
+  await page.waitForFunction(() => document.getElementById('turn-title').textContent === '一起确认终局');
+  await page.locator('#resume-button').click(); await page.waitForFunction(() => document.getElementById('score-panel').classList.contains('hidden'));
+  await page.locator('#mode-ai').click(); await page.locator('[name="size"][value="9"]').check({ force: true });
+  await page.locator('#new-form [type="submit"]').click(); await waitMoves(page, 0);
+  await page.waitForFunction(() => !document.getElementById('pass-button').disabled);
+  await page.locator('[data-index="40"]').click(); await waitMoves(page, 2);
+  assert.equal(await page.locator('.stone.white').count(), 1);
+  await page.locator('#undo-button').click(); await waitMoves(page, 0);
+  await phone.reload(); await waitMoves(phone, 0);
+  assert.equal(await phone.locator('.intersection').count(), 81);
+  assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await phone.screenshot({ path: '.artifacts/mobile.png', fullPage: true });
+  await page.locator('[data-index="40"]').focus(); await page.keyboard.press('ArrowRight'); await page.keyboard.press('Enter');
+  await waitMoves(page, 2);
+  await page.locator('#rules-button').click(); assert.equal(await page.locator('#rules-dialog').isVisible(), true);
+  await page.keyboard.press('Escape');
+  await page.locator('#resign-button').click(); await page.locator('#confirm-yes').click();
+  await page.waitForFunction(() => document.getElementById('turn-title').textContent.includes('胜'));
+  assert.deepEqual(errors, []);
+  console.log('Browser checks passed: desktop/mobile, cloud resume, two-context sync, offline read-only, undo, scoring, AI, keyboard, dialogs.');
+} finally { await browser.close(); }

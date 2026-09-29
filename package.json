@@ -1,0 +1,17 @@
+{
+  "name": "yi-jian-go",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-isolation=none tests/*.test.mjs",
+    "test:browser": "node tests/browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2",
+    "drizzle-kit": "^0.31.9",
+    "drizzle-orm": "^0.45.1"
+  }
+}

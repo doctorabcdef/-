@@ -1,0 +1,296 @@
+import { colorName, coordinate, score } from './engine.js';
+import { API_BASE } from './config.js';
+
+const $ = id => document.getElementById(id);
+const local = ['localhost', '127.0.0.1'].includes(location.hostname);
+const api = local ? '/api/game' : `${API_BASE}/api/game`;
+const cacheKey = 'yijian:shared-game:v1';
+let game = null, revision = -1, updatedAt = '', online = false, busy = false, refreshing = false, showNumbers = false;
+let focusedIndex = 0, dialogRevision = -1, toastTimer;
+
+function toast(message) {
+  $('toast').textContent = message;
+  $('toast').classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 4800);
+}
+
+function updateSync() {
+  const status = $('sync-status');
+  status.classList.toggle('error', !online);
+  status.replaceChildren();
+  status.append(document.createElement('i'), document.createTextNode(busy ? '正在保存' : online ? '云端已同步' : game ? '离线 · 只读' : '连接中'));
+  $('save-detail').textContent = online
+    ? `已保存${updatedAt ? '于 ' + new Date(updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''}，电脑和手机打开即续局。`
+    : game ? '当前显示最后同步的棋局。恢复连接后才能落子。' : '正在获取云端存档，请稍候。';
+}
+
+function validPayload(data) {
+  return Number.isInteger(data?.revision) && data.revision >= 0 && data.game?.format === 1 &&
+    [9, 13, 19].includes(data.game.size) && Array.isArray(data.game.board) &&
+    data.game.board.length === data.game.size ** 2 && data.game.board.every(n => [0, 1, 2].includes(n)) &&
+    ['playing', 'scoring', 'finished'].includes(data.game.phase) && [1, 2].includes(data.game.turn) &&
+    ['local', 'ai'].includes(data.game.mode) && Array.isArray(data.game.moves) && Array.isArray(data.game.dead) && data.game.captures;
+}
+
+function accept(data, cached = false) {
+  if (!validPayload(data) || data.revision < revision) return false;
+  game = data.game; revision = data.revision; updatedAt = data.updatedAt;
+  if (!cached) {
+    try { localStorage.setItem(cacheKey, JSON.stringify(data)); } catch { /* Cloud remains authoritative. */ }
+  }
+  render();
+  return true;
+}
+
+async function refresh() {
+  if (refreshing || busy) return;
+  refreshing = true;
+  try {
+    const response = await fetch(`${api}${online && revision >= 0 ? `?revision=${revision}` : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '云端连接失败');
+    if (!data.unchanged && !validPayload(data)) throw new Error('云端存档格式不正确');
+    online = true;
+    if (!data.unchanged) accept(data);
+    $('board-overlay').classList.add('hidden');
+  } catch {
+    online = false;
+    if (!game) {
+      $('board-overlay').classList.remove('hidden');
+      $('board-overlay').querySelector('p').textContent = '暂时连不上云端棋盘，请检查网络后重试。';
+      $('board-overlay').querySelector('.spinner').classList.add('hidden');
+      $('retry-button').classList.remove('hidden');
+    }
+  } finally {
+    refreshing = false;
+    updateSync();
+    updateControls();
+  }
+}
+
+async function submit(action, expectedRevision = revision) {
+  if (busy || !online || !game) { toast('请等待云端连接后再操作'); return false; }
+  busy = true;
+  updateControls(); updateSync();
+  let success = false;
+  try {
+    const response = await fetch(api, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: expectedRevision, action }), signal: AbortSignal.timeout(15000) });
+    const data = await response.json();
+    if (data.game) accept(data);
+    if (!response.ok) {
+      if (response.status === 409) { toast(data.error); }
+      else throw new Error(data.error || '操作未能保存');
+    } else {
+      if (!validPayload(data)) throw new Error('未能确认保存结果，请重新连接');
+      online = true; success = true;
+      if (action.type === 'new') toast('新对局已开始，所有设备已共享这张棋盘');
+      if (action.type === 'undo') toast(game.mode === 'ai' ? '已撤回到你落子之前' : '已撤回上一手');
+    }
+  } catch (error) {
+    if (error.name === 'TimeoutError' || error instanceof TypeError || /未能确认/.test(error.message)) {
+      online = false;
+      toast('连接暂时中断，正在重新核对云端进度，请勿重复落子');
+    } else toast(error.message);
+  } finally {
+    busy = false; updateControls(); updateSync();
+    if (!success) await refresh();
+  }
+  return success;
+}
+
+function buildBoard() {
+  const board = $('board'), size = game?.size || 19;
+  board.replaceChildren();
+  board.style.setProperty('--size', size);
+  board.setAttribute('aria-label', `${size} 路围棋棋盘，用方向键移动，回车键落子`);
+  board.setAttribute('aria-rowcount', size); board.setAttribute('aria-colcount', size);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 1000 1000'); svg.classList.add('board-svg'); svg.setAttribute('aria-hidden', 'true');
+  const step = 890 / size, first = 55 + step / 2, last = 945 - step / 2;
+  let markup = '<g stroke="#79613e" stroke-width="1" opacity=".84">';
+  for (let i = 0; i < size; i++) {
+    const position = first + step * i;
+    markup += `<path d="M${first} ${position}H${last}M${position} ${first}V${last}"/>`;
+  }
+  markup += `</g><rect x="${first}" y="${first}" width="${last-first}" height="${last-first}" fill="none" stroke="#79613e" stroke-width="1.7"/>`;
+  const stars = size === 19 ? [3, 9, 15] : size === 13 ? [3, 6, 9] : [2, 4, 6];
+  for (const r of stars) for (const c of stars) {
+    if (size !== 19 && (r === stars[1] || c === stars[1]) && r !== c) continue;
+    markup += `<circle cx="${first + c * step}" cy="${first + r * step}" r="${size === 19 ? 4.1 : 5}" fill="#695431"/>`;
+  }
+  markup += '<g fill="#816945" font-family="Arial,sans-serif" font-size="16" text-anchor="middle" dominant-baseline="central">';
+  for (let i = 0; i < size; i++) {
+    const position = first + step * i, letter = 'ABCDEFGHJKLMNOPQRST'[i];
+    markup += `<text x="${position}" y="31">${letter}</text><text x="${position}" y="971">${letter}</text><text x="27" y="${position}">${size-i}</text><text x="973" y="${position}">${size-i}</text>`;
+  }
+  svg.innerHTML = `${markup}</g>`;
+  board.append(svg);
+  const grid = document.createElement('div'); grid.className = 'board-grid';
+  for (let r = 0; r < size; r++) {
+    const row = document.createElement('div'); row.setAttribute('role', 'row'); row.style.display = 'contents';
+    for (let c = 0; c < size; c++) {
+      const button = document.createElement('button'), index = r * size + c;
+      button.type = 'button'; button.className = 'intersection empty'; button.dataset.index = index;
+      button.setAttribute('role', 'gridcell'); button.setAttribute('aria-colindex', c + 1); button.setAttribute('aria-rowindex', r + 1);
+      button.tabIndex = index === Math.min(focusedIndex, size * size - 1) ? 0 : -1;
+      row.append(button);
+    }
+    grid.append(row);
+  }
+  board.append(grid); board.dataset.size = size;
+}
+
+function renderBoard() {
+  const board = $('board');
+  if (Number(board.dataset.size) !== game.size) buildBoard();
+  board.dataset.turn = game.turn; board.dataset.phase = game.phase;
+  const ownership = game.phase === 'scoring' || (game.phase === 'finished' && game.result?.reason === 'score') ? score(game).territory : [];
+  const numbers = new Map();
+  game.moves.forEach((move, index) => { if (move.type === 'play') numbers.set(move.index, index + 1); });
+  board.querySelectorAll('.intersection').forEach((button, index) => {
+    const color = game.board[index], label = coordinate(index, game.size);
+    button.classList.toggle('empty', !color);
+    button.setAttribute('aria-label', `${label}，${color ? colorName(color) : '空点'}${game.dead.includes(index) ? '，已标记死子' : ''}`);
+    button.replaceChildren();
+    if (color) {
+      const stone = document.createElement('span');
+      stone.className = `stone ${color === 1 ? 'black' : 'white'}${game.last === index ? ' last' : ''}${showNumbers ? ' numbered' : ''}${game.dead.includes(index) ? ' dead' : ''}`;
+      if (showNumbers) stone.textContent = numbers.get(index) || '';
+      button.append(stone);
+    }
+    if (ownership[index]) {
+      const dot = document.createElement('span'); dot.className = `territory ${ownership[index] === 2 ? 'white' : ''}`; button.append(dot);
+    }
+  });
+}
+
+function updateControls() {
+  const disabled = !online || busy || !game;
+  $('board').setAttribute('aria-busy', busy || !game ? 'true' : 'false');
+  $('board').setAttribute('aria-disabled', disabled ? 'true' : 'false');
+  $('pass-button').disabled = disabled || game?.phase !== 'playing';
+  $('undo-button').disabled = disabled || !game?.canUndo;
+  $('resign-button').disabled = disabled || game?.phase !== 'playing';
+  ['new-button', 'mode-local', 'mode-ai', 'resume-button', 'finish-button'].forEach(id => { $(id).disabled = disabled; });
+  $('new-form').querySelector('[type="submit"]').disabled = disabled;
+  $('confirm-yes').disabled = disabled;
+}
+
+function render() {
+  if (!game) return;
+  renderBoard();
+  $('size-label').textContent = `${game.size} 路棋盘`;
+  $('mode-local').classList.toggle('active', game.mode === 'local');
+  $('mode-ai').classList.toggle('active', game.mode === 'ai');
+  $('mode-local').setAttribute('aria-pressed', game.mode === 'local');
+  $('mode-ai').setAttribute('aria-pressed', game.mode === 'ai');
+  $('black-name').textContent = game.mode === 'ai' ? '你' : '黑方';
+  $('white-name').textContent = game.mode === 'ai' ? '电脑' : '白方';
+  $('black-captures').textContent = game.captures[1]; $('white-captures').textContent = game.captures[2];
+  $('black-player').classList.toggle('current', game.phase === 'playing' && game.turn === 1);
+  $('white-player').classList.toggle('current', game.phase === 'playing' && game.turn === 2);
+  $('turn-stone').className = `stone-icon ${game.turn === 1 ? 'black' : 'white'}`;
+  $('turn-title').textContent = game.phase === 'finished' ? `${colorName(game.result.winner)}胜` : game.phase === 'scoring' ? '一起确认终局' : `轮到${colorName(game.turn)}`;
+  $('turn-detail').textContent = game.phase === 'finished' ? game.result.reason === 'resign' ? '对方认输 · 本局结束' : `领先 ${game.result.margin} 目 · 本局结束`
+    : game.phase === 'scoring' ? '连续停两手，开始数子' : game.mode === 'ai' ? '你执黑先行 · 电脑入门棋力' : game.passes ? '上一手停着，可以落子或停一手' : '从容落子，好棋不急';
+  $('move-count').textContent = `第 ${game.moves.length} 手`;
+  $('board-hint').textContent = game.phase === 'scoring' ? '点击棋块标记死子 · 再次点击取消' : game.phase === 'finished' ? '本局已结束 · 可以悔棋或开始新局' : `点击交叉点落子 · ${colorName(game.turn)}行棋`;
+  $('score-panel').classList.toggle('hidden', game.phase !== 'scoring');
+  if (game.phase === 'scoring') {
+    const result = score(game); $('black-score').textContent = result.black; $('white-score').textContent = result.white;
+  }
+  if (game.moves.length) {
+    $('move-list').replaceChildren();
+    game.moves.slice(-40).map((move, index) => ({ ...move, number: Math.max(0, game.moves.length - 40) + index + 1 })).reverse().forEach(move => {
+      const item = document.createElement('li');
+      const no = document.createElement('span'); no.className = 'move-no'; no.textContent = String(move.number).padStart(2, '0');
+      const stone = document.createElement('span'); stone.className = `stone-icon ${move.color === 1 ? 'black' : 'white'} small`; stone.setAttribute('aria-hidden', 'true');
+      const description = document.createElement('span'); description.textContent = `${colorName(move.color)}${move.captured ? ` · 提 ${move.captured} 子` : ''}`;
+      const place = document.createElement('span'); place.className = 'move-location'; place.textContent = move.type === 'pass' ? '停一手' : coordinate(move.index, game.size);
+      item.append(no, stone, description, place); $('move-list').append(item);
+    });
+    $('record-count').textContent = `${game.moves.length} 手${game.moves.length > 40 ? ' · 最近 40 手' : ''}`;
+  } else {
+    $('move-list').innerHTML = '<li class="empty-record"><span class="empty-grid" aria-hidden="true">＋</span><p>落下第一子</p><span>从这一手，开始一盘好棋。</span></li>';
+    $('record-count').textContent = '本局棋谱';
+  }
+  $('board-overlay').classList.add('hidden');
+  updateControls(); updateSync();
+}
+
+$('board').addEventListener('click', event => {
+  const button = event.target.closest('[data-index]');
+  if (!button || !game || game.phase === 'finished') return;
+  const index = Number(button.dataset.index);
+  if (game.phase === 'scoring' && !game.board[index]) return;
+  if (game.phase === 'playing' && game.board[index]) { toast('这里已经有棋子了'); return; }
+  void submit({ type: game.phase === 'scoring' ? 'dead' : 'play', index });
+});
+$('board').addEventListener('keydown', event => {
+  const button = event.target.closest('[data-index]'); if (!button || !game) return;
+  const index = Number(button.dataset.index), size = game.size;
+  const row = Math.floor(index / size), col = index % size;
+  let next = index;
+  if (event.key === 'ArrowUp') next = Math.max(0, row - 1) * size + col;
+  else if (event.key === 'ArrowDown') next = Math.min(size - 1, row + 1) * size + col;
+  else if (event.key === 'ArrowLeft') next = row * size + Math.max(0, col - 1);
+  else if (event.key === 'ArrowRight') next = row * size + Math.min(size - 1, col + 1);
+  else return;
+  event.preventDefault(); button.tabIndex = -1;
+  const target = $('board').querySelector(`[data-index="${next}"]`); target.tabIndex = 0; target.focus(); focusedIndex = next;
+});
+$('board').addEventListener('focusin', event => {
+  const index = event.target.dataset.index;
+  if (index === undefined) return;
+  $('board').querySelectorAll('[tabindex="0"]').forEach(button => { button.tabIndex = -1; });
+  event.target.tabIndex = 0; focusedIndex = Number(index);
+});
+$('show-numbers').addEventListener('change', event => { showNumbers = event.target.checked; if (game) renderBoard(); });
+$('retry-button').addEventListener('click', refresh);
+$('pass-button').addEventListener('click', () => submit({ type: 'pass' }));
+$('undo-button').addEventListener('click', () => submit({ type: 'undo' }));
+$('resume-button').addEventListener('click', () => submit({ type: 'resume' }));
+$('finish-button').addEventListener('click', () => submit({ type: 'finish' }));
+$('rules-button').addEventListener('click', () => $('rules-dialog').showModal());
+document.querySelectorAll('dialog').forEach(dialog => {
+  dialog.querySelectorAll('.close-button,.close-dialog').forEach(button => button.addEventListener('click', () => dialog.close()));
+  dialog.addEventListener('click', event => { if (event.target === dialog) { const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) dialog.close(); } });
+});
+function openNew(mode = game?.mode) {
+  if (!game) return;
+  dialogRevision = revision; $('new-mode').value = mode;
+  $('new-form').querySelector(`[name="size"][value="${game.size}"]`).checked = true;
+  $('new-dialog').showModal();
+}
+$('new-button').addEventListener('click', () => openNew());
+document.querySelectorAll('[data-mode]').forEach(button => button.addEventListener('click', () => { if (button.dataset.mode !== game?.mode) openNew(button.dataset.mode); }));
+$('new-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const action = { type: 'new', mode: $('new-mode').value, size: Number(new FormData(event.target).get('size')) };
+  $('new-dialog').close(); await submit(action, dialogRevision);
+});
+$('resign-button').addEventListener('click', () => { dialogRevision = revision; $('confirm-title').textContent = `确认${colorName(game.turn)}认输？`; $('confirm-dialog').showModal(); });
+$('confirm-yes').addEventListener('click', () => { $('confirm-dialog').close(); void submit({ type: 'resign' }, dialogRevision); });
+
+// Optional WebMCP entry points use the same cloud actions as the visible controls.
+if (document.modelContext?.registerTool) {
+  const context = document.modelContext;
+  const register = tool => { try { Promise.resolve(context.registerTool(tool)).catch(() => {}); } catch {} };
+  register({ name: 'read_go_game', description: 'Read the current shared Go board and whose turn it is.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true }, execute: async () => { await refresh(); return { revision, online, game }; } });
+  register({ name: 'play_go_stone', description: 'Place a stone on the public shared Go board. This changes the game for every visitor.', inputSchema: { type: 'object', properties: { row: { type: 'integer', minimum: 0 }, column: { type: 'integer', minimum: 0 } }, required: ['row', 'column'], additionalProperties: false }, execute: async input => {
+    if (!game || game.phase !== 'playing' || !Number.isInteger(input?.row) || !Number.isInteger(input?.column) || input.row < 0 || input.column < 0 || input.row >= game.size || input.column >= game.size) throw new Error('无效的交叉点');
+    if (!await submit({ type: 'play', index: input.row * game.size + input.column })) throw new Error('落子未保存');
+    return { revision, turn: game.turn, moves: game.moves.length };
+  } });
+}
+
+try { const saved = JSON.parse(localStorage.getItem(cacheKey)); if (validPayload(saved)) accept(saved, true); } catch { /* Ignore a damaged preview cache; load the cloud copy. */ }
+if (!game) buildBoard();
+updateControls();
+void refresh();
+setInterval(() => { if (!document.hidden) void refresh(); }, 3000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
+window.addEventListener('online', refresh);
+window.addEventListener('offline', () => { online = false; updateSync(); updateControls(); });

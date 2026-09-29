@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#182622">
+  <meta name="description" content="弈间，一张随时继续的围棋棋盘。支持双人对弈、入门人机对弈和电脑手机云端续局。">
+  <title>弈间 · 在线围棋</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23182622'/%3E%3Ccircle cx='25' cy='26' r='15' fill='%23d8ad72'/%3E%3Ccircle cx='39' cy='40' r='15' fill='%23f7f4ed'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./src/style.css">
+  <script type="module" src="./src/app.js"></script>
+</head>
+<body>
+  <header class="header">
+    <a class="brand" href="./" aria-label="弈间首页"><span class="brand-icon" aria-hidden="true"><i></i><i></i></span><span>弈间<span class="brand-sub">YI JIAN</span></span></a>
+    <nav aria-label="主导航"><span class="nav-active">对弈室</span><button id="rules-button" class="text-button">围棋规则 <span aria-hidden="true">↗</span></button></nav>
+    <span class="header-note">一方棋盘，随时续弈</span>
+  </header>
+  <main class="layout">
+    <section class="play-area" aria-label="围棋棋盘">
+      <div class="board-heading"><div><span class="eyebrow">THE GO ROOM</span><h1>黑白之间，自有天地。</h1></div><span class="board-size-label" id="size-label">19 路棋盘</span></div>
+      <div class="board-frame">
+        <div id="board" class="board" role="grid" aria-label="围棋棋盘，用方向键移动，回车键落子" aria-busy="true"></div>
+        <div id="board-overlay" class="board-overlay"><span class="spinner"></span><p>正在找回棋局…</p><button id="retry-button" class="secondary hidden">重新连接</button></div>
+      </div>
+      <div class="board-caption"><span><span class="tiny-stone"></span> <span id="board-hint">点击交叉点落子 · 黑棋先行</span></span><label class="toggle-label"><input id="show-numbers" type="checkbox"><span class="switch"></span>手数</label></div>
+      <div class="public-note"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M7 17H6a4 4 0 0 1-1-7.87 7 7 0 0 1 13.6-1.3A4.6 4.6 0 0 1 18 17h-1M12 12v9m-3-6 3-3 3 3"/></svg><span>一张公共棋盘，电脑与手机共享进度。每一手，都会自动保存。</span></div>
+    </section>
+    <aside class="sidebar" aria-label="对局控制">
+      <section class="game-panel">
+        <div class="panel-top"><span class="eyebrow">当前对局</span><span id="sync-status" class="sync-status" role="status"><i></i>连接中</span></div>
+        <div class="mode-tabs" role="group" aria-label="对弈模式"><button id="mode-local" class="active" data-mode="local">双人对弈</button><button id="mode-ai" data-mode="ai">人机对弈<span>入门</span></button></div>
+        <div id="turn-status" class="turn-status"><span id="turn-stone" class="stone-icon black"></span><div><h2 id="turn-title">等待棋局</h2><p id="turn-detail">正在连接云端棋盘</p></div><span class="turn-mark" aria-hidden="true">弈</span></div>
+        <div class="players"><div class="player-card" id="black-player"><div class="player-label"><span class="stone-icon black small"></span><span id="black-name">黑方</span><span class="player-tag">先手</span></div><div class="capture"><strong id="black-captures">0</strong><span>提子</span></div></div><div class="player-card" id="white-player"><div class="player-label"><span class="stone-icon white small"></span><span id="white-name">白方</span><span class="player-tag">贴 7.5</span></div><div class="capture"><strong id="white-captures">0</strong><span>提子</span></div></div></div>
+        <div id="score-panel" class="score-panel hidden"><div><span>黑方</span><strong id="black-score">0</strong><span>白方（含贴目）</span><strong id="white-score">7.5</strong></div><p>点选死子，整块标记；再次点击取消。双方确认后结算。</p><div class="score-actions"><button id="resume-button" class="secondary">继续对局</button><button id="finish-button" class="primary">确认结果</button></div></div>
+        <div class="main-actions"><button id="pass-button" class="primary" disabled><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>停一手</button><button id="undo-button" class="secondary" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 4 3 9l5 5M3 9h11a6 6 0 0 1 0 12"/></svg>悔棋</button></div>
+        <div class="sub-actions"><button id="new-button" class="text-button">＋ 开始新局</button><button id="resign-button" class="text-button" disabled>认输</button></div>
+        <div class="panel-foot"><span id="move-count">第 0 手</span><span>数子法 · 白贴 7.5 目</span></div>
+      </section>
+      <section class="record-panel"><div class="section-title"><h2>落子记录</h2><span id="record-count">本局棋谱</span></div><ol id="move-list" class="move-list"><li class="empty-record"><span class="empty-grid" aria-hidden="true">＋</span><p>落下第一子</p><span>从这一手，开始一盘好棋。</span></li></ol></section>
+      <div class="save-note"><span class="note-title">落子有声，离席无妨。</span><p id="save-detail">再次打开这里，接着上次的棋局下。</p><span class="shared-label">公共对局 · 所有访客均可操作</span></div>
+    </aside>
+  </main>
+  <footer><span>弈间 <span class="footer-dot">·</span> 让每一局，都有下文。</span><span>黑白十九路，方寸有乾坤。</span></footer>
+  <div id="toast" class="toast hidden" role="alert"></div>
+  <dialog id="new-dialog"><form id="new-form"><div class="dialog-heading"><span class="eyebrow">NEW GAME</span><button type="button" class="close-button" aria-label="关闭">×</button></div><h2>开启一盘新棋</h2><p>这是公共棋盘。开始新局会替换所有设备上的当前对局。</p><label for="new-mode">对弈方式</label><select id="new-mode"><option value="local">双人同屏对弈</option><option value="ai">人机对弈 · 你执黑先行</option></select><label for="new-size">棋盘大小</label><div class="size-options" id="new-size"><label><input type="radio" name="size" value="9"><span>9 路<small>轻松入门</small></span></label><label><input type="radio" name="size" value="13"><span>13 路<small>小局练习</small></span></label><label><input type="radio" name="size" value="19" checked><span>19 路<small>标准棋盘</small></span></label></div><div class="dialog-actions"><button type="button" class="secondary close-dialog">保留当前棋局</button><button type="submit" class="primary">开始新局</button></div></form></dialog>
+  <dialog id="rules-dialog"><div class="dialog-heading"><span class="eyebrow">HOW TO PLAY</span><button class="close-button" aria-label="关闭">×</button></div><h2>从一子开始</h2><div class="rules-list"><div><b>01</b><p><strong>轮流落子</strong>黑棋先行，双方在棋盘交叉点交替落子。以棋子和围住的空地总数决定胜负。</p></div><div><b>02</b><p><strong>气与提子</strong>相邻的空交叉点是棋子的“气”。一块棋的气全部被堵住，就会被提走。禁止自杀落子。</p></div><div><b>03</b><p><strong>打劫与停一手</strong>落子不能重现此前相同轮次的局面（禁全同）。双方连续停一手后，进入数子阶段。</p></div><div><b>04</b><p><strong>确认死子，再数子</strong>点击标记双方认可的死子，然后确认结果。有争议可继续对局。使用面积计分，白方贴 7.5 目，提子不重复加分。</p></div><div><b>05</b><p><strong>跨设备继续</strong>每次操作保存到同一张云端棋盘，其他设备几秒内更新。所有访客都能落子、悔棋和开始新局。断网时仅展示最后同步的棋局。</p></div></div><p class="rules-footer">人机模式为入门练习，你执黑，电脑执白。方向键移动棋盘焦点，回车或空格落子。</p><button class="primary close-dialog full-width">知道了，开始下棋</button></dialog>
+  <dialog id="confirm-dialog"><h2 id="confirm-title">确认认输？</h2><p id="confirm-text">当前对局将结束，所有设备会同步结果。</p><div class="dialog-actions"><button class="secondary close-dialog">继续下棋</button><button id="confirm-yes" class="primary">确认认输</button></div></dialog>
+</body>
+</html>
