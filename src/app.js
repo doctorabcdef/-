@@ -1,5 +1,6 @@
 import { colorName, coordinate, score } from './engine.js';
 import { API_BASE } from './config.js';
+import { createGameSync } from './sync.js';
 
 const $ = id => document.getElementById(id);
 const local = ['localhost', '127.0.0.1'].includes(location.hostname);
@@ -20,85 +21,47 @@ function updateSync() {
   status.classList.toggle('error', !online);
   status.replaceChildren();
   status.append(document.createElement('i'), document.createTextNode(busy ? '正在保存' : online ? '云端已同步' : game ? '离线 · 只读' : '连接中'));
-  $('save-detail').textContent = online
+  $('save-detail').textContent = busy ? '棋盘已更新，正在保存到云端…' : online
     ? `已保存${updatedAt ? '于 ' + new Date(updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''}，电脑和手机打开即续局。`
     : game ? '当前显示最后同步的棋局。恢复连接后才能落子。' : '正在获取云端存档，请稍候。';
 }
 
-function validPayload(data) {
-  return Number.isInteger(data?.revision) && data.revision >= 0 && data.game?.format === 1 &&
-    [9, 13, 19].includes(data.game.size) && Array.isArray(data.game.board) &&
-    data.game.board.length === data.game.size ** 2 && data.game.board.every(n => [0, 1, 2].includes(n)) &&
-    ['playing', 'scoring', 'finished'].includes(data.game.phase) && [1, 2].includes(data.game.turn) &&
-    ['local', 'ai'].includes(data.game.mode) && Array.isArray(data.game.moves) && Array.isArray(data.game.dead) && data.game.captures;
-}
-
-function accept(data, cached = false) {
-  if (!validPayload(data) || data.revision < revision) return false;
-  game = data.game; revision = data.revision; updatedAt = data.updatedAt;
-  if (!cached) {
-    try { localStorage.setItem(cacheKey, JSON.stringify(data)); } catch { /* Cloud remains authoritative. */ }
-  }
-  render();
-  return true;
-}
-
-async function refresh() {
-  if (refreshing || busy) return;
-  refreshing = true;
-  try {
-    const response = await fetch(`${api}${online && revision >= 0 ? `?revision=${revision}` : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+const sync = createGameSync({
+  async get(knownRevision, signal) {
+    const response = await fetch(`${api}${knownRevision !== undefined ? `?revision=${knownRevision}` : ''}`, {
+      cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
+    });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '云端连接失败');
-    if (!data.unchanged && !validPayload(data)) throw new Error('云端存档格式不正确');
-    online = true;
-    if (!data.unchanged) accept(data);
-    $('board-overlay').classList.add('hidden');
-  } catch {
-    online = false;
-    if (!game) {
+    return data;
+  },
+  async post(expectedRevision, action) {
+    const response = await fetch(api, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: expectedRevision, action }), signal: AbortSignal.timeout(15000), keepalive: true });
+    return { ok: response.ok, status: response.status, data: await response.json() };
+  },
+  cache: data => localStorage.setItem(cacheKey, JSON.stringify(data)),
+  onError: toast,
+  onSaved(action, current) {
+    if (action.type === 'new') toast('新对局已开始，所有设备已共享这张棋盘');
+    if (action.type === 'undo') toast(current.mode === 'ai' ? '已撤回到你落子之前' : '已撤回上一手');
+  },
+  onChange(state) {
+    const previous = game;
+    ({ game, revision, updatedAt, online, busy, refreshing } = state);
+    if (game && game !== previous) render();
+    else { updateControls(); updateSync(); }
+    if (online) $('board-overlay').classList.add('hidden');
+    if (!game && !online && !refreshing) {
       $('board-overlay').classList.remove('hidden');
       $('board-overlay').querySelector('p').textContent = '暂时连不上云端棋盘，请检查网络后重试。';
       $('board-overlay').querySelector('.spinner').classList.add('hidden');
       $('retry-button').classList.remove('hidden');
     }
-  } finally {
-    refreshing = false;
-    updateSync();
-    updateControls();
-  }
-}
-
-async function submit(action, expectedRevision = revision) {
-  if (busy || !online || !game) { toast('请等待云端连接后再操作'); return false; }
-  busy = true;
-  updateControls(); updateSync();
-  let success = false;
-  try {
-    const response = await fetch(api, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ revision: expectedRevision, action }), signal: AbortSignal.timeout(15000) });
-    const data = await response.json();
-    if (data.game) accept(data);
-    if (!response.ok) {
-      if (response.status === 409) { toast(data.error); }
-      else throw new Error(data.error || '操作未能保存');
-    } else {
-      if (!validPayload(data)) throw new Error('未能确认保存结果，请重新连接');
-      online = true; success = true;
-      if (action.type === 'new') toast('新对局已开始，所有设备已共享这张棋盘');
-      if (action.type === 'undo') toast(game.mode === 'ai' ? '已撤回到你落子之前' : '已撤回上一手');
-    }
-  } catch (error) {
-    if (error.name === 'TimeoutError' || error instanceof TypeError || /未能确认/.test(error.message)) {
-      online = false;
-      toast('连接暂时中断，正在重新核对云端进度，请勿重复落子');
-    } else toast(error.message);
-  } finally {
-    busy = false; updateControls(); updateSync();
-    if (!success) await refresh();
-  }
-  return success;
-}
+  },
+});
+const refresh = () => sync.refresh();
+const submit = (action, expectedRevision = revision) => sync.submit(action, expectedRevision);
 
 function buildBoard() {
   const board = $('board'), size = game?.size || 19;
@@ -167,15 +130,16 @@ function renderBoard() {
 }
 
 function updateControls() {
-  const disabled = !online || busy || !game;
-  $('board').setAttribute('aria-busy', busy || !game ? 'true' : 'false');
-  $('board').setAttribute('aria-disabled', disabled ? 'true' : 'false');
-  $('pass-button').disabled = disabled || game?.phase !== 'playing';
+  const disabled = !online || !game;
+  const aiThinking = game?.mode === 'ai' && game.phase === 'playing' && game.turn === 2;
+  $('board').setAttribute('aria-busy', !game ? 'true' : 'false');
+  $('board').setAttribute('aria-disabled', disabled || aiThinking ? 'true' : 'false');
+  $('pass-button').disabled = disabled || aiThinking || game?.phase !== 'playing';
   $('undo-button').disabled = disabled || !game?.canUndo;
-  $('resign-button').disabled = disabled || game?.phase !== 'playing';
-  ['new-button', 'mode-local', 'mode-ai', 'resume-button', 'finish-button'].forEach(id => { $(id).disabled = disabled; });
-  $('new-form').querySelector('[type="submit"]').disabled = disabled;
-  $('confirm-yes').disabled = disabled;
+  $('resign-button').disabled = disabled || busy || game?.phase !== 'playing';
+  ['new-button', 'mode-local', 'mode-ai', 'resume-button', 'finish-button'].forEach(id => { $(id).disabled = disabled || busy; });
+  $('new-form').querySelector('[type="submit"]').disabled = disabled || busy;
+  $('confirm-yes').disabled = disabled || busy;
 }
 
 function render() {
@@ -192,11 +156,12 @@ function render() {
   $('black-player').classList.toggle('current', game.phase === 'playing' && game.turn === 1);
   $('white-player').classList.toggle('current', game.phase === 'playing' && game.turn === 2);
   $('turn-stone').className = `stone-icon ${game.turn === 1 ? 'black' : 'white'}`;
-  $('turn-title').textContent = game.phase === 'finished' ? `${colorName(game.result.winner)}胜` : game.phase === 'scoring' ? '一起确认终局' : `轮到${colorName(game.turn)}`;
+  const aiThinking = game.mode === 'ai' && game.phase === 'playing' && game.turn === 2;
+  $('turn-title').textContent = game.phase === 'finished' ? `${colorName(game.result.winner)}胜` : game.phase === 'scoring' ? '一起确认终局' : aiThinking ? '电脑思考中' : `轮到${colorName(game.turn)}`;
   $('turn-detail').textContent = game.phase === 'finished' ? game.result.reason === 'resign' ? '对方认输 · 本局结束' : `领先 ${game.result.margin} 目 · 本局结束`
-    : game.phase === 'scoring' ? '连续停两手，开始数子' : game.mode === 'ai' ? '你执黑先行 · 电脑入门棋力' : game.passes ? '上一手停着，可以落子或停一手' : '从容落子，好棋不急';
+    : game.phase === 'scoring' ? '连续停两手，开始数子' : aiThinking ? '你已落子 · 等待电脑应手' : game.mode === 'ai' ? '你执黑先行 · 电脑入门棋力' : game.passes ? '上一手停着，可以落子或停一手' : '从容落子，好棋不急';
   $('move-count').textContent = `第 ${game.moves.length} 手`;
-  $('board-hint').textContent = game.phase === 'scoring' ? '点击棋块标记死子 · 再次点击取消' : game.phase === 'finished' ? '本局已结束 · 可以悔棋或开始新局' : `点击交叉点落子 · ${colorName(game.turn)}行棋`;
+  $('board-hint').textContent = game.phase === 'scoring' ? '点击棋块标记死子 · 再次点击取消' : game.phase === 'finished' ? '本局已结束 · 可以悔棋或开始新局' : aiThinking ? '电脑思考中 · 可以悔棋' : `点击交叉点落子 · ${colorName(game.turn)}行棋`;
   $('score-panel').classList.toggle('hidden', game.phase !== 'scoring');
   if (game.phase === 'scoring') {
     const result = score(game); $('black-score').textContent = result.black; $('white-score').textContent = result.white;
@@ -286,11 +251,14 @@ if (document.modelContext?.registerTool) {
   } });
 }
 
-try { const saved = JSON.parse(localStorage.getItem(cacheKey)); if (validPayload(saved)) accept(saved, true); } catch { /* Ignore a damaged preview cache; load the cloud copy. */ }
+try { sync.restoreCached(JSON.parse(localStorage.getItem(cacheKey))); } catch { /* Load the cloud copy. */ }
 if (!game) buildBoard();
 updateControls();
 void refresh();
 setInterval(() => { if (!document.hidden) void refresh(); }, 3000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
 window.addEventListener('online', refresh);
-window.addEventListener('offline', () => { online = false; updateSync(); updateControls(); });
+window.addEventListener('offline', () => sync.offline());
+window.addEventListener('beforeunload', event => {
+  if (busy) { event.preventDefault(); event.returnValue = ''; }
+});

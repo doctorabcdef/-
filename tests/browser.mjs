@@ -13,6 +13,7 @@ for (const p of [page, phone]) {
   await p.route('https://fonts.googleapis.com/**', route => route.abort());
 }
 const waitMoves = async (p, count) => p.waitForFunction(n => document.getElementById('move-count').textContent === `第 ${n} 手`, count);
+const waitSaved = p => p.waitForFunction(() => document.getElementById('sync-status').textContent.includes('云端已同步'));
 try {
   await page.goto(base); await page.waitForFunction(() => document.getElementById('sync-status').textContent.includes('云端已同步'));
   await page.locator('#new-button').click();
@@ -24,9 +25,11 @@ try {
   await page.screenshot({ path: '.artifacts/desktop.png', fullPage: true });
   await phone.goto(base); await phone.waitForFunction(() => !document.getElementById('pass-button').disabled);
   await page.locator('[data-index="60"]').click(); await waitMoves(page, 1);
+  await waitSaved(page);
   await phone.reload(); await waitMoves(phone, 1);
   assert.equal(await phone.locator('[data-index="60"] .stone.black').count(), 1);
   await phone.locator('[data-index="300"]').tap(); await waitMoves(phone, 2);
+  await waitSaved(phone);
   await waitMoves(page, 2);
   await page.reload(); await waitMoves(page, 2);
   assert.equal(await page.locator('[data-index="300"] .stone.white').count(), 1);
@@ -45,6 +48,7 @@ try {
   await page.locator('[data-index="40"]').click(); await waitMoves(page, 2);
   assert.equal(await page.locator('.stone.white').count(), 1);
   await page.locator('#undo-button').click(); await waitMoves(page, 0);
+  await waitSaved(page);
   await phone.reload(); await waitMoves(phone, 0);
   assert.equal(await phone.locator('.intersection').count(), 81);
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
