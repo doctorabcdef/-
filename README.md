@@ -2,6 +2,8 @@
 
 面向电脑、手机的中文围棋网页。所有访客共享同一张公共棋盘；关闭网页、刷新或更换设备后，打开同一网址即可继续云端保存的对局。
 
+网页地址：[https://doctorabcdef.github.io/-/](https://doctorabcdef.github.io/-/)
+
 ## 功能
 
 - 双人对弈、入门人机对弈（人类执黑，电脑执白）
@@ -40,6 +42,8 @@ npm run test:browser # Windows Edge 浏览器端测试，先启动开发服务
 - API 地址：`src/config.js`。这是公开接口地址，前端不包含 GitHub 访问令牌或数据库密钥。
 
 发布云端服务时，`node scripts/prepare-cloud.mjs` 将源文件及迁移复制到本地忽略的 `.cloud-workspace/`。该目录的 `.openai/hosting.json` 绑定现有 Sites 项目；更新时需保留项目 ID 和已应用迁移。前端 GitHub Actions 不会修改云端项目。
+
+`backend/hosting.json` 保留云端项目的公开标识，方便重新检出后复用同一数据库。Windows 原生打包后备脚本为 `scripts/package-cloud.mjs`；应先通过 Sites 工作流构建并推送完全相同的源代码，再打包、保存版本并部署，不要新建替代数据库。
 
 数据表只有一条 `id = shared` 的棋局记录，含局面、历史、模式、提子、阶段、结果、更新时间和递增版本号。浏览器 localStorage 仅缓存只读预览，云端数据库始终是正式存档来源。公共接口只允许规定大小的操作请求，并限制对局历史长度。
 

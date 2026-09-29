@@ -14,7 +14,9 @@ await writeFile('dist/server/index.js', source.replace("'../src/engine.js'", "'.
 await cp('src/engine.js', 'dist/server/engine.js');
 console.log('Cloud worker built.');
 `);
-const manifest = JSON.parse(await readFile(`${root}/.openai/hosting.json`, 'utf8'));
+let manifest;
+try { manifest = JSON.parse(await readFile(`${root}/.openai/hosting.json`, 'utf8')); }
+catch { manifest = JSON.parse(await readFile('backend/hosting.json', 'utf8')); }
 manifest.d1 = 'DB';
 await writeFile(`${root}/.openai/hosting.json`, JSON.stringify(manifest, null, 2) + '\n');
 console.log('Cloud source and generated migrations prepared.');
