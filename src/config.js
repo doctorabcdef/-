@@ -1,1 +1,1 @@
-export const API_BASE = 'https://yijian-go-sync.foamy-lion-7455.chatgpt.site';
+export const API_BASE = 'https://yijian-go-sync.cx668899668899.chatgpt.site';
