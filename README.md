@@ -33,6 +33,7 @@ npm test             # 围棋规则、持久化及并发冲突测试
 npm run build        # 生成 dist/ 静态网页
 npm run test:browser # Windows Edge 浏览器端测试，先启动开发服务
 node tests/latency.mjs # 将云端回复延迟 1.5 秒，验证落子与悔棋仍立即显示
+node tests/mobile-compat.mjs # 模拟旧手机缺少新取消接口，验证加载、保存及断网重试
 ```
 
 ## 部署结构

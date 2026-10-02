@@ -34,10 +34,10 @@ export function previewAction(state, action) {
 }
 
 export function createGameSync({ get, post, onChange, onError = () => {}, onSaved = () => {}, cache = () => {} }) {
-  let confirmed = null, visible = null, online = false, sending = false, poll = null, epoch = 0;
+  let confirmed = null, visible = null, online = false, sending = false, poll = null, epoch = 0, connectionError = '';
   const queue = [];
   const state = () => ({ game: visible, revision: confirmed?.revision ?? -1, updatedAt: confirmed?.updatedAt ?? '',
-    online, busy: sending || queue.length > 0, refreshing: !!poll });
+    online, busy: sending || queue.length > 0, refreshing: !!poll, connectionError });
   const emit = () => onChange(state());
   function remember(data, cached = false) {
     if (!validPayload(data)) throw new Error('云端存档格式不正确');
@@ -56,7 +56,8 @@ export function createGameSync({ get, post, onChange, onError = () => {}, onSave
     poll?.abort();
     poll = null;
   }
-  async function refresh() {
+  async function refresh({ manual = false } = {}) {
+    if (manual) { connectionError = ''; emit(); }
     if (sending || queue.length || poll) return;
     const controller = new AbortController(), generation = epoch;
     poll = controller; emit();
@@ -66,9 +67,12 @@ export function createGameSync({ get, post, onChange, onError = () => {}, onSave
       if (data.unchanged) {
         if (!confirmed || data.revision !== confirmed.revision) throw new Error('存档版本不一致');
       } else remember(data);
-      online = true; rebuild();
-    } catch {
-      if (generation === epoch) online = false;
+      online = true; connectionError = ''; rebuild();
+    } catch (error) {
+      if (generation === epoch) {
+        online = false;
+        connectionError = error.message || '暂时连不上云端棋盘，请稍后重试。';
+      }
     } finally {
       if (poll === controller) { poll = null; emit(); }
     }
@@ -87,7 +91,7 @@ export function createGameSync({ get, post, onChange, onError = () => {}, onSave
           throw new Error(response.data?.error || '操作未能保存');
         }
         if (!validPayload(response.data) || response.data.revision !== expected + 1) throw new Error('未能确认保存结果');
-        remember(response.data); online = true;
+        remember(response.data); online = true; connectionError = '';
         queue.shift(); item.resolve(true);
         // Keep later previews visible, even when this response contains an AI reply.
         rebuild(); emit(); onSaved(item.action, visible);
@@ -97,6 +101,7 @@ export function createGameSync({ get, post, onChange, onError = () => {}, onSave
       queue.splice(0).forEach(item => item.resolve(false));
       visible = confirmed?.game ?? null;
       online = false;
+      connectionError = '保存结果暂未确认，正在重新读取云端棋局。';
       onError(reconcile ? error.message : '保存结果暂未确认，正在重新读取云端棋局，请勿重复落子');
       reconcile = true;
     } finally {
@@ -119,6 +124,6 @@ export function createGameSync({ get, post, onChange, onError = () => {}, onSave
   return {
     state, submit, refresh,
     restoreCached(data) { try { remember(data, true); rebuild(); emit(); } catch { /* Load the real cloud copy instead. */ } },
-    offline() { invalidatePoll(); online = false; emit(); },
+    offline() { invalidatePoll(); online = false; connectionError = '设备已离线，请恢复网络连接后重试。'; emit(); },
   };
 }

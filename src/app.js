@@ -1,12 +1,13 @@
 import { colorName, coordinate, score } from './engine.js';
 import { API_BASE } from './config.js';
 import { createGameSync } from './sync.js';
+import { requestJson } from './http.js';
 
 const $ = id => document.getElementById(id);
 const local = ['localhost', '127.0.0.1'].includes(location.hostname);
 const api = local ? '/api/game' : `${API_BASE}/api/game`;
 const cacheKey = 'yijian:shared-game:v1';
-let game = null, revision = -1, updatedAt = '', online = false, busy = false, refreshing = false, showNumbers = false;
+let game = null, revision = -1, updatedAt = '', online = false, busy = false, connectionError = '', showNumbers = false;
 let focusedIndex = 0, dialogRevision = -1, toastTimer;
 
 function toast(message) {
@@ -20,25 +21,24 @@ function updateSync() {
   const status = $('sync-status');
   status.classList.toggle('error', !online);
   status.replaceChildren();
-  status.append(document.createElement('i'), document.createTextNode(busy ? '正在保存' : online ? '云端已同步' : game ? '离线 · 只读' : '连接中'));
+  status.append(document.createElement('i'), document.createTextNode(busy ? '正在保存' : online ? '云端已同步' : game ? '离线 · 只读' : connectionError ? '连接失败' : '连接中'));
   $('save-detail').textContent = busy ? '棋盘已更新，正在保存到云端…' : online
     ? `已保存${updatedAt ? '于 ' + new Date(updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''}，电脑和手机打开即续局。`
-    : game ? '当前显示最后同步的棋局。恢复连接后才能落子。' : '正在获取云端存档，请稍候。';
+    : game ? '当前显示最后同步的棋局。恢复连接后才能落子。' : connectionError || '正在获取云端存档，请稍候。';
 }
 
 const sync = createGameSync({
   async get(knownRevision, signal) {
-    const response = await fetch(`${api}${knownRevision !== undefined ? `?revision=${knownRevision}` : ''}`, {
-      cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
+    const response = await requestJson(`${api}${knownRevision !== undefined ? `?revision=${knownRevision}` : ''}`, {
+      cache: 'no-store', signal,
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '云端连接失败');
+    const { data } = response;
+    if (!response.ok) throw new Error(data?.error || `云端服务暂时不可用（${response.status}），请稍后重试。`);
     return data;
   },
   async post(expectedRevision, action) {
-    const response = await fetch(api, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ revision: expectedRevision, action }), signal: AbortSignal.timeout(15000), keepalive: true });
-    return { ok: response.ok, status: response.status, data: await response.json() };
+    return requestJson(api, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: expectedRevision, action }), timeoutMs: 15000, keepalive: true });
   },
   cache: data => localStorage.setItem(cacheKey, JSON.stringify(data)),
   onError: toast,
@@ -48,15 +48,15 @@ const sync = createGameSync({
   },
   onChange(state) {
     const previous = game;
-    ({ game, revision, updatedAt, online, busy, refreshing } = state);
+    ({ game, revision, updatedAt, online, busy, connectionError } = state);
     if (game && game !== previous) render();
     else { updateControls(); updateSync(); }
     if (online) $('board-overlay').classList.add('hidden');
-    if (!game && !online && !refreshing) {
+    if (!game && !online) {
       $('board-overlay').classList.remove('hidden');
-      $('board-overlay').querySelector('p').textContent = '暂时连不上云端棋盘，请检查网络后重试。';
-      $('board-overlay').querySelector('.spinner').classList.add('hidden');
-      $('retry-button').classList.remove('hidden');
+      $('board-overlay').querySelector('p').textContent = connectionError || '正在连接云端，找回棋局…';
+      $('board-overlay').querySelector('.spinner').classList.toggle('hidden', !!connectionError);
+      $('retry-button').classList.toggle('hidden', !connectionError);
     }
   },
 });
@@ -213,7 +213,7 @@ $('board').addEventListener('focusin', event => {
   event.target.tabIndex = 0; focusedIndex = Number(index);
 });
 $('show-numbers').addEventListener('change', event => { showNumbers = event.target.checked; if (game) renderBoard(); });
-$('retry-button').addEventListener('click', refresh);
+$('retry-button').addEventListener('click', () => sync.refresh({ manual: true }));
 $('pass-button').addEventListener('click', () => submit({ type: 'pass' }));
 $('undo-button').addEventListener('click', () => submit({ type: 'undo' }));
 $('resume-button').addEventListener('click', () => submit({ type: 'resume' }));

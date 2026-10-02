@@ -5,6 +5,33 @@ import { createGameSync, restoreGame } from '../src/sync.js';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('initial connection errors remain visible during background retry and clear after recovery', async () => {
+  let pending;
+  const sync = createGameSync({
+    get: async () => {
+      if (pending) return pending.promise;
+      throw new Error('连接云端超时');
+    },
+    onChange: () => {},
+  });
+  await sync.refresh();
+  assert.equal(sync.state().online, false);
+  assert.equal(sync.state().refreshing, false);
+  assert.equal(sync.state().connectionError, '连接云端超时');
+  pending = deferred();
+  const retrying = sync.refresh();
+  assert.equal(sync.state().refreshing, true);
+  assert.equal(sync.state().connectionError, '连接云端超时');
+  // A manual retry can show progress even when an automatic retry is in flight.
+  await sync.refresh({ manual: true });
+  assert.equal(sync.state().connectionError, '');
+  pending.resolve({ revision: 0, game: publicState(createGame({ size: 9 })) });
+  await retrying;
+  assert.equal(sync.state().online, true);
+  assert.equal(sync.state().connectionError, '');
+});
+
 function harness(initial = createGame({ size: 9 })) {
   let server = initial, revision = 0, heldGet = null;
   const requests = [], changes = [], errors = [], saved = [];
