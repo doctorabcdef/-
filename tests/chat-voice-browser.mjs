@@ -18,13 +18,18 @@ const messages = [
   { id: 1, clientId: hex(1), requestId: hex(101), text: '之前的聊天记录仍然保留。', createdAt: '2026-10-07T08:00:00.000Z' },
   { id: 2, clientId: hex(2), requestId: hex(102), text: '轮到你落子啦。', createdAt: '2026-10-07T08:01:00.000Z' },
 ];
-const posts = [], errors = [], unexpected = [], audioResponses = [];
+const posts = [], errors = [], unexpected = [], audioResponses = [], immediatePlayback = [];
+const postGates = new Map();
 const fulfill = (route, data) => route.fulfill({ contentType: 'application/json', headers, body: JSON.stringify(data) });
 
 async function prepare(name, options) {
   const context = await browser.newContext({ ...options, serviceWorkers: 'block' });
   await context.addInitScript(() => {
     for (const method of ['any', 'timeout']) Object.defineProperty(AbortSignal, method, { configurable: true, writable: true, value: undefined });
+    window.chatPlaybackEvents = [];
+    document.addEventListener('playing', event => {
+      if (event.target instanceof HTMLMediaElement) window.chatPlaybackEvents.push({ src: event.target.currentSrc, at: performance.now() });
+    }, true);
   });
   await context.route('https://fonts.googleapis.com/**', route => route.abort());
   await context.route(url => url.pathname.startsWith('/api/'), async route => {
@@ -62,6 +67,8 @@ async function prepare(name, options) {
       assert.equal(body.voiceId ?? null, null);
       assert.ok(body.text.length > 0 && body.text.length <= 500);
     }
+    const gate = postGates.get(`${name}:${body.voiceId}`);
+    if (gate) { await gate.promise; gate.replied = true; }
     let message = messages.find(item => item.clientId === body.clientId && item.requestId === body.requestId);
     if (!message) {
       message = { id: messages.at(-1).id + 1, clientId: body.clientId, requestId: body.requestId,
@@ -95,6 +102,45 @@ async function sendByClick(page, selector) {
   assert.equal(posts.length, start + 1, 'Each send click must create exactly one API request');
   const body = posts[start];
   await waitSent(page, body.requestId);
+  return body;
+}
+const playbackCount = page => page.evaluate(() => window.chatPlaybackEvents.length);
+async function sendVoiceAndPlay(page, receiver, device, voiceId) {
+  const gate = { replied: false };
+  gate.promise = new Promise(resolve => { gate.release = resolve; });
+  postGates.set(`${device}:${voiceId}`, gate);
+  const beforePosts = posts.length, beforeOwn = await playbackCount(page), beforeReceived = await playbackCount(receiver);
+  const button = page.locator(`[data-chat-voice="${voiceId}"]`);
+  let body;
+  try {
+    await button.evaluate(element => element.addEventListener('click', () => { window.chatShortcutClickAt = performance.now(); }, { once: true }));
+    await button.click();
+    await page.waitForFunction(filename => {
+      const audio = document.getElementById('chat-audio');
+      return audio.currentSrc.endsWith(`/assets/voices/${filename}`) && !audio.paused && audio.currentTime > 0.02;
+    }, voices[voiceId].filename);
+    assert.equal(posts.length, beforePosts + 1, 'The voice click must also enqueue exactly one message');
+    body = posts[beforePosts];
+    assert.equal(body.voiceId, voiceId);
+    assert.equal(gate.replied, false, 'Playback must begin while the POST is still held');
+    assert.equal(await row(page, body.requestId).locator('[data-message-status]').getAttribute('data-message-status'), 'sending');
+    assert.equal(await page.locator('audio').count(), 1);
+    assert.equal(await playbackCount(page), beforeOwn + 1, 'The shortcut must start exactly one playback');
+    const state = await page.locator('#chat-audio').evaluate(audio => ({ duration: audio.duration, error: audio.error?.message || null,
+      clickToPlayingMs: window.chatPlaybackEvents.at(-1).at - window.chatShortcutClickAt }));
+    assert.ok(Math.abs(state.duration - voices[voiceId].duration) < 0.08);
+    assert.equal(state.error, null);
+    await page.waitForFunction(() => document.getElementById('chat-audio').ended, null, { timeout: 10000 });
+    assert.equal(gate.replied, false, 'The whole recording must play without waiting for cloud confirmation');
+    immediatePlayback.push({ device, voiceId, clickToPlayingMs: Math.round(state.clickToPlayingMs), playedBeforePostReply: true });
+  } finally {
+    gate.release();
+    postGates.delete(`${device}:${voiceId}`);
+  }
+  await waitSent(page, body.requestId);
+  await waitSent(receiver, body.requestId);
+  assert.equal(await playbackCount(page), beforeOwn + 1, 'Cloud acknowledgement must not start the recording again');
+  assert.equal(await playbackCount(receiver), beforeReceived, 'Receiving another device\'s message must not autoplay');
   return body;
 }
 async function assertLayout(page) {
@@ -171,23 +217,20 @@ try {
     assert.ok((await row(current, hex(101)).textContent()).includes('之前的聊天记录仍然保留。'));
     assert.deepEqual(await current.evaluate(() => [typeof AbortSignal.any, typeof AbortSignal.timeout]), ['undefined', 'undefined']);
     await assertLayout(current);
-    await current.locator('#chat-audio').evaluate(audio => {
-      window.chatAutomaticPlaybackStarts = 0;
-      audio.addEventListener('playing', () => { window.chatAutomaticPlaybackStarts++; });
-    });
+    assert.equal(await playbackCount(current), 0, 'Loading existing history must not autoplay');
   }
   await page.locator('#chat-nickname').fill('桌边棋友');
   await phone.locator('#chat-nickname').fill('手机棋友');
   const draft = '正在思考下一步，这段草稿要留着。';
   await page.locator('#chat-input').fill(draft);
-  const firstVoice = await sendByClick(page, '[data-chat-voice="too-slow"]');
+  const firstVoice = await sendVoiceAndPlay(page, phone, 'desktop', 'too-slow');
   assert.deepEqual({ kind: firstVoice.kind, voiceId: firstVoice.voiceId, text: firstVoice.text, nickname: firstVoice.nickname },
     { kind: 'voice', voiceId: 'too-slow', text: '太慢了太慢了', nickname: '桌边棋友' });
   assert.equal(await page.locator('#chat-input').inputValue(), draft);
   await waitSent(phone, firstVoice.requestId);
   assert.ok((await row(phone, firstVoice.requestId).locator('.chat-meta').textContent()).includes('桌边棋友'));
   await page.locator('#chat-nickname').fill('改名后的棋友');
-  const secondVoice = await sendByClick(page, '[data-chat-voice="hurry-up"]');
+  const secondVoice = await sendVoiceAndPlay(page, phone, 'desktop', 'hurry-up');
   assert.deepEqual({ kind: secondVoice.kind, voiceId: secondVoice.voiceId, text: secondVoice.text, nickname: secondVoice.nickname },
     { kind: 'voice', voiceId: 'hurry-up', text: '搞快点好不', nickname: '改名后的棋友' });
   assert.equal(await page.locator('#chat-input').inputValue(), draft);
@@ -205,6 +248,12 @@ try {
     assert.equal(await page.locator('#chat-input').inputValue(), draft);
     await waitSent(phone, sent.requestId);
   }
+  await phone.locator('#chat-input').fill(draft);
+  for (const voiceId of Object.keys(voices)) {
+    const sent = await sendVoiceAndPlay(phone, page, 'mobile', voiceId);
+    assert.equal(sent.nickname, '手机棋友');
+    assert.equal(await phone.locator('#chat-input').inputValue(), draft);
+  }
   const longText = '棋'.repeat(500);
   await phone.locator('#chat-input').fill(longText);
   assert.ok((await phone.locator('#chat-count').textContent()).includes('500'));
@@ -214,11 +263,12 @@ try {
   assert.notEqual(longMessage.clientId, firstVoice.clientId);
   await waitSent(page, longMessage.requestId);
   for (const current of [page, phone]) {
-    assert.equal(await current.evaluate(() => window.chatAutomaticPlaybackStarts), 0, 'Sending or receiving a voice message must not autoplay');
+    assert.equal(await playbackCount(current), 2, 'Only the two locally clicked voice shortcuts may start playback');
     assert.equal(await current.locator('#chat-audio').evaluate(audio => audio.paused), true);
     await assertLayout(current);
     await current.reload({ waitUntil: 'domcontentloaded' });
     for (const message of [firstVoice, secondVoice, longMessage]) await waitSent(current, message.requestId);
+    assert.equal(await playbackCount(current), 0, 'Reloading saved voice history must not autoplay');
     assert.equal(await row(current, longMessage.requestId).locator('.chat-text').textContent(), longText);
     assert.ok((await row(current, firstVoice.requestId).locator('.chat-meta').textContent()).includes('桌边棋友'));
   }
@@ -256,6 +306,6 @@ try {
   await page.locator('#chat-panel').screenshot({ path: '.artifacts/chat-voice-card-desktop.png' });
   await phone.locator('#chat-panel').screenshot({ path: '.artifacts/chat-voice-card-mobile.png' });
   console.log(JSON.stringify({ result: 'Voice chat browser checks passed', base, mockedApiOnly: true, actualAudio: true,
-    sentMessages: posts.length, playback, checked: ['legacy history', 'voice mapping', 'nickname snapshots/local persistence', 'text quick phrases', '500-character cross-device history', 'draft retention', 'no voice autoplay', 'real audio playback/replay', 'single-player switching', '320/390/540/768px layout', 'missing AbortSignal statics', 'page errors'],
+    sentMessages: posts.length, immediatePlayback, playback, checked: ['legacy history', 'voice mapping', 'nickname snapshots/local persistence', 'text quick phrases', '500-character cross-device history', 'draft retention', 'shortcut playback before POST confirmation', 'no received/history autoplay', 'real audio playback/replay', 'single-player switching', '320/390/540/768px layout', 'missing AbortSignal statics', 'page errors'],
     screenshots: ['chat-voice-desktop.png', 'chat-voice-mobile.png', 'chat-voice-card-desktop.png', 'chat-voice-card-mobile.png'] }));
 } finally { await browser.close(); }

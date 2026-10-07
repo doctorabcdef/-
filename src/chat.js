@@ -89,8 +89,8 @@ function createChat(panel, api) {
     try { audio.currentTime = 0; } catch { /* No metadata has loaded yet. */ }
     updateVoiceButtons();
   }
-  function playVoice(button) {
-    const clip = voiceClip(button.dataset.voiceId), key = button.closest('.chat-message')?.dataset.chatKey;
+  function playVoice(voiceId, key) {
+    const clip = voiceClip(voiceId);
     if (!clip || !key) return;
     if (playbackKey === key && playbackState !== 'idle') { stopPlayback(); return; }
     const version = ++playbackVersion;
@@ -261,6 +261,7 @@ function createChat(panel, api) {
       nickname: nickname.value.trim().slice(0, 24), createdAt: new Date().toISOString(), status: 'sending', sequence: sequence++ });
     if (clearInput) input.value = '';
     outbox.push(requestId); render({ additions: 1 }); void flush();
+    return requestId;
   }
   const auto = createAutoRefresh({ refresh, getState: () => ({ online, refreshing: !!reading, busy: false }),
     isVisible: () => !document.hidden && !suspended, isConnected: connected });
@@ -278,11 +279,15 @@ function createChat(panel, api) {
   });
   bind(panel, 'click', event => {
     const play = event.target.closest('[data-chat-play]');
-    if (play) { playVoice(play); return; }
+    if (play) { playVoice(play.dataset.voiceId, play.closest('.chat-message')?.dataset.chatKey); return; }
     const voice = event.target.closest('[data-chat-voice]');
     if (voice && !voice.disabled) {
       const clip = voiceClip(voice.dataset.chatVoice);
-      if (clip) send(clip.label, false, voice.dataset.chatVoice);
+      if (clip) {
+        const requestId = send(clip.label, false, voice.dataset.chatVoice);
+        // Play in this same click gesture, without waiting for the cloud save.
+        if (requestId) playVoice(voice.dataset.chatVoice, `${clientId}:${requestId}`);
+      }
       return;
     }
     const quick = event.target.closest('[data-chat-send]');
