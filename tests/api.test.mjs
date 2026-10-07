@@ -5,20 +5,50 @@ import { handleRequest } from '../backend/worker.js';
 
 function setup() {
   const db = new DatabaseSync(':memory:');
+  const reads = [], writes = [];
   db.exec('CREATE TABLE games (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, state TEXT NOT NULL, updated_at TEXT NOT NULL)');
   const env = { DB: { prepare(sql) { return { bind(...args) { return {
-    async first() { return db.prepare(sql).get(...args); },
-    async run() { return { meta: { changes: db.prepare(sql).run(...args).changes } }; },
+    async first() { const row = db.prepare(sql).get(...args); reads.push({ sql, row }); return row; },
+    async run() { writes.push(sql); return { meta: { changes: db.prepare(sql).run(...args).changes } }; },
   }; } }; } } };
   const call = async (body, options = {}) => {
-    const response = await handleRequest(new Request('https://cloud.test/api/game', {
+    const response = await handleRequest(new Request(`https://cloud.test/api/game${options.revision !== undefined ? `?revision=${encodeURIComponent(options.revision)}` : ''}`, {
       method: body === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'Origin': 'https://doctorabcdef.github.io', ...options.headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     }), env);
     return { status: response.status, body: await response.json(), headers: response.headers };
   };
-  return { call, db, env };
+  return { call, db, env, reads, writes };
 }
+
+test('unchanged checks read one metadata row without database writes or full game history', async () => {
+  const { call, db, reads, writes } = setup(); await call();
+  reads.length = 0; writes.length = 0;
+  const check = await call(undefined, { revision: 0 });
+  assert.equal(check.status, 200);
+  assert.deepEqual(check.body, { unchanged: true, revision: 0 });
+  assert.equal(reads.length, 1); assert.equal(reads[0].row.state, null);
+  assert.equal(writes.length, 0);
+  assert.equal(check.headers.get('Cache-Control'), 'no-store'); db.close();
+});
+
+test('changed revision returns the latest game in one read and no writes', async () => {
+  const { call, db, reads, writes } = setup(); await call();
+  await call({ revision: 0, action: { type: 'play', index: 180 } });
+  reads.length = 0; writes.length = 0;
+  const check = await call(undefined, { revision: 0 });
+  assert.equal(check.status, 200); assert.equal(check.body.revision, 1);
+  assert.equal(check.body.game.board[180], 1);
+  assert.equal(reads.length, 1); assert.equal(writes.length, 0); db.close();
+});
+
+test('concurrent first reads initialize one shared game and return the same saved copy', async () => {
+  const { call, db } = setup();
+  const [a, b] = await Promise.all([call(), call()]);
+  assert.equal(a.status, 200); assert.equal(b.status, 200);
+  assert.deepEqual(a.body, b.body);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM games').get().count, 1); db.close();
+});
 
 test('save and reopen uses the same cloud game', async () => {
   const { call, db } = setup(); const first = await call();

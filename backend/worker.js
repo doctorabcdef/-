@@ -18,13 +18,23 @@ export async function handleRequest(request, env) {
   if (url.pathname !== '/api/game') return json({ error: '未找到接口' }, 404, headers);
   if (!['GET', 'POST'].includes(request.method)) return json({ error: '不支持的请求方式' }, 405, headers);
   try {
-    await env.DB.prepare('INSERT OR IGNORE INTO games (id, revision, state, updated_at) VALUES (?, ?, ?, ?)')
-      .bind('shared', 0, JSON.stringify(createGame()), new Date().toISOString()).run();
-    const row = await env.DB.prepare('SELECT revision, state, updated_at FROM games WHERE id = ?').bind('shared').first();
+    const requestedRevision = url.searchParams.get('revision');
+    const knownRevision = request.method === 'GET' && /^\d+$/.test(requestedRevision || '') && Number.isSafeInteger(Number(requestedRevision))
+      ? Number(requestedRevision) : -1;
+    // Frequent unchanged checks read only revision metadata, not the full history.
+    // Existing games never need a write just because another device is polling.
+    const read = () => env.DB.prepare('SELECT revision, updated_at, CASE WHEN revision = ? THEN NULL ELSE state END AS state FROM games WHERE id = ?')
+      .bind(knownRevision, 'shared').first();
+    let row = await read();
+    if (!row) {
+      await env.DB.prepare('INSERT OR IGNORE INTO games (id, revision, state, updated_at) VALUES (?, ?, ?, ?)')
+        .bind('shared', 0, JSON.stringify(createGame()), new Date().toISOString()).run();
+      row = await read(); // Another request may have initialized/updated it first.
+    }
+    if (request.method === 'GET' && knownRevision === row.revision) return json({ unchanged: true, revision: row.revision }, 200, headers);
     const state = JSON.parse(row.state);
     const payload = () => ({ revision: row.revision, updatedAt: row.updated_at, game: publicState(state) });
     if (request.method === 'GET') {
-      if (url.searchParams.get('revision') === String(row.revision)) return json({ unchanged: true, revision: row.revision }, 200, headers);
       return json(payload(), 200, headers);
     }
     if (!request.headers.get('Content-Type')?.startsWith('application/json')) return json({ error: '需要 JSON 请求' }, 415, headers);

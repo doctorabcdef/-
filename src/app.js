@@ -2,6 +2,7 @@ import { colorName, coordinate, score } from './engine.js';
 import { API_BASE } from './config.js';
 import { createGameSync } from './sync.js';
 import { requestJson } from './http.js';
+import { createAutoRefresh } from './poll.js';
 
 const $ = id => document.getElementById(id);
 const local = ['localhost', '127.0.0.1'].includes(location.hostname);
@@ -20,11 +21,13 @@ function toast(message) {
 function updateSync() {
   const status = $('sync-status');
   status.classList.toggle('error', !online);
-  status.replaceChildren();
-  status.append(document.createElement('i'), document.createTextNode(busy ? '正在保存' : online ? '云端已同步' : game ? '离线 · 只读' : connectionError ? '连接失败' : '连接中'));
-  $('save-detail').textContent = busy ? '棋盘已更新，正在保存到云端…' : online
+  const label = busy ? '正在保存' : online ? '云端已同步' : game ? '离线 · 只读' : connectionError ? '连接失败' : '连接中';
+  // Keep fast unchanged checks from repeatedly announcing the same live status.
+  if (status.textContent !== label) status.replaceChildren(document.createElement('i'), document.createTextNode(label));
+  const detail = busy ? '棋盘已更新，正在保存到云端…' : online
     ? `已保存${updatedAt ? '于 ' + new Date(updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''}，电脑和手机打开即续局。`
     : game ? '当前显示最后同步的棋局。恢复连接后才能落子。' : connectionError || '正在获取云端存档，请稍候。';
+  if ($('save-detail').textContent !== detail) $('save-detail').textContent = detail;
 }
 
 const sync = createGameSync({
@@ -213,7 +216,7 @@ $('board').addEventListener('focusin', event => {
   event.target.tabIndex = 0; focusedIndex = Number(index);
 });
 $('show-numbers').addEventListener('change', event => { showNumbers = event.target.checked; if (game) renderBoard(); });
-$('retry-button').addEventListener('click', () => sync.refresh({ manual: true }));
+$('retry-button').addEventListener('click', async () => { autoSync.stop(); await sync.refresh({ manual: true }); autoSync.start(); });
 $('pass-button').addEventListener('click', () => submit({ type: 'pass' }));
 $('undo-button').addEventListener('click', () => submit({ type: 'undo' }));
 $('resume-button').addEventListener('click', () => submit({ type: 'resume' }));
@@ -255,10 +258,17 @@ try { sync.restoreCached(JSON.parse(localStorage.getItem(cacheKey))); } catch { 
 if (!game) buildBoard();
 updateControls();
 void refresh();
-setInterval(() => { if (!document.hidden) void refresh(); }, 3000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
-window.addEventListener('online', refresh);
-window.addEventListener('offline', () => sync.offline());
+const autoSync = createAutoRefresh({
+  refresh, getState: sync.state,
+  isVisible: () => !document.hidden, isConnected: () => navigator.onLine !== false,
+});
+autoSync.start();
+document.addEventListener('visibilitychange', () => { if (document.hidden) autoSync.stop(); else autoSync.wake(); });
+window.addEventListener('focus', () => autoSync.wake());
+window.addEventListener('online', () => autoSync.wake());
+window.addEventListener('offline', () => { autoSync.stop(); sync.offline(); });
+window.addEventListener('pagehide', () => autoSync.stop());
+window.addEventListener('pageshow', event => { if (event.persisted) autoSync.wake(); });
 window.addEventListener('beforeunload', event => {
   if (busy) { event.preventDefault(); event.returnValue = ''; }
 });
