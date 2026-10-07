@@ -15,6 +15,13 @@
       "when": 1791358622813,
       "tag": "0001_persistent_chat",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791361097182,
+      "tag": "0002_chat_voice_nicknames",
+      "breakpoints": true
     }
   ]
 }

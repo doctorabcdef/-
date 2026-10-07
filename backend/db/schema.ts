@@ -12,4 +12,7 @@ export const chatMessages = sqliteTable('chat_messages', {
   requestId: text('request_id').notNull(),
   text: text('text').notNull(),
   createdAt: text('created_at').notNull(),
+  kind: text('kind').notNull().default('text'),
+  voiceId: text('voice_id'),
+  nickname: text('nickname').notNull().default(''),
 }, table => [uniqueIndex('chat_messages_client_request_unique').on(table.clientId, table.requestId)]);

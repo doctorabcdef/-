@@ -71,7 +71,7 @@ async function prepare(options) {
     const key = messageKey(body);
     let message = messages.find(item => messageKey(item) === key);
     if (!message) {
-      message = { id: messages.at(-1).id + 1, ...body, createdAt: new Date().toISOString() };
+      message = { id: messages.at(-1).id + 1, kind: 'text', voiceId: null, nickname: '', ...body, createdAt: new Date().toISOString() };
       messages.push(message);
     }
     assert.equal(message.text, body.text, 'A retry must preserve the original text');

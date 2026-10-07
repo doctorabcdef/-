@@ -40,14 +40,18 @@
         <div class="panel-foot"><span id="move-count">第 0 手</span><span>数子法 · 白贴 7.5 目</span></div>
       </section>
       <section id="chat-panel" class="chat-panel" aria-labelledby="chat-title">
-        <div class="chat-heading"><div><h2 id="chat-title">棋间闲聊</h2><p>公共聊天 · 换局也保留</p></div><span id="chat-status" class="chat-status" role="status">连接中</span></div>
+        <div class="chat-heading"><h2 id="chat-title">棋间聊两句</h2><span class="chat-eyebrow">CHAT</span></div>
+        <p class="chat-description">历史消息自动保存，所有访客可见。</p>
         <div class="chat-history"><button id="chat-older" type="button" class="chat-older hidden">加载更早消息</button><div id="chat-messages" class="chat-messages" role="log" aria-label="公共聊天消息" aria-live="polite" aria-relevant="additions" tabindex="0"><p class="chat-empty">正在加载聊天记录…</p></div><button id="chat-new" type="button" class="chat-new hidden">有新消息 ↓</button></div>
-        <div class="chat-quick" role="group" aria-label="一键发送常用语或表情">
+        <div class="chat-quick" role="group" aria-label="一键发送常用语">
           <button type="button" data-chat-send="太慢了">太慢了</button><button type="button" data-chat-send="搞快点好不">搞快点好不</button>
-          <button type="button" class="chat-emoji" data-chat-send="😀" aria-label="发送开心表情">😀</button><button type="button" class="chat-emoji" data-chat-send="👍" aria-label="发送点赞表情">👍</button><button type="button" class="chat-emoji" data-chat-send="🤔" aria-label="发送思考表情">🤔</button><button type="button" class="chat-emoji" data-chat-send="😂" aria-label="发送笑哭表情">😂</button><button type="button" class="chat-emoji" data-chat-send="😅" aria-label="发送汗笑表情">😅</button><button type="button" class="chat-emoji" data-chat-send="👏" aria-label="发送鼓掌表情">👏</button>
         </div>
-        <form id="chat-form" class="chat-form"><label class="chat-sr-only" for="chat-input">发送给所有棋友，最多 300 字</label><textarea id="chat-input" maxlength="300" rows="2" placeholder="和棋友说点什么…" enterkeyhint="send"></textarea><div class="chat-compose-foot"><span id="chat-count">0 / 300</span><button id="chat-send" type="submit" disabled>发送 <span aria-hidden="true">↑</span></button></div></form>
+        <div class="chat-voice-presets" role="group" aria-label="一键发送语音"><button type="button" data-chat-voice="too-slow" aria-label="发送语音：太慢了太慢了"><span aria-hidden="true">▶</span>太慢了太慢了</button><button type="button" data-chat-voice="hurry-up" aria-label="发送语音：搞快点好不"><span aria-hidden="true">▶</span>搞快点好不</button></div>
+        <div class="chat-emojis" role="group" aria-label="一键发送表情"><button type="button" data-chat-send="😀" aria-label="发送开心表情">😀</button><button type="button" data-chat-send="😂" aria-label="发送笑哭表情">😂</button><button type="button" data-chat-send="🤔" aria-label="发送思考表情">🤔</button><button type="button" data-chat-send="😭" aria-label="发送大哭表情">😭</button><button type="button" data-chat-send="👍" aria-label="发送点赞表情">👍</button><button type="button" data-chat-send="🎉" aria-label="发送庆祝表情">🎉</button></div>
+        <form id="chat-form" class="chat-form"><div class="chat-nickname-row"><label for="chat-nickname">昵称</label><input id="chat-nickname" type="text" maxlength="24" placeholder="昵称" autocomplete="nickname" aria-label="聊天昵称，最多 24 字"></div><label class="chat-sr-only" for="chat-input">发送给所有棋友，最多 500 字</label><textarea id="chat-input" maxlength="500" rows="3" placeholder="说点什么…" enterkeyhint="send"></textarea><div class="chat-compose-foot"><span id="chat-count">0 / 500</span><button id="chat-send" type="submit" disabled>发送</button></div></form>
+        <p id="chat-status" class="chat-status" role="status">连接中</p>
         <p id="chat-error" class="chat-error hidden" role="status"></p>
+        <audio id="chat-audio" preload="none" class="hidden"></audio>
       </section>
       <section class="record-panel"><div class="section-title"><h2>落子记录</h2><span id="record-count">本局棋谱</span></div><ol id="move-list" class="move-list"><li class="empty-record"><span class="empty-grid" aria-hidden="true">＋</span><p>落下第一子</p><span>从这一手，开始一盘好棋。</span></li></ol></section>
       <div class="save-note"><span class="note-title">落子有声，离席无妨。</span><p id="save-detail">再次打开这里，接着上次的棋局下。</p><span class="shared-label">公共对局 · 所有访客均可操作</span></div>

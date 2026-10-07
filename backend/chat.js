@@ -1,11 +1,14 @@
+import { CHAT_VOICES } from '../src/chat-voices.js';
+
 const PAGE_SIZE = 50;
 const identifier = /^[0-9a-f]{32}$/i;
-const columns = 'id, client_id, request_id, text, created_at';
+const columns = 'id, client_id, request_id, text, created_at, kind, voice_id, nickname';
 const json = (body, status, headers) => new Response(JSON.stringify(body), {
   status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers },
 });
 const message = row => ({
   id: row.id, clientId: row.client_id, requestId: row.request_id, text: row.text, createdAt: row.created_at,
+  kind: row.kind, voiceId: row.voice_id, nickname: row.nickname,
 });
 
 export async function handleChat(request, env, headers) {
@@ -52,18 +55,34 @@ export async function handleChat(request, env, headers) {
       typeof body?.requestId !== 'string' || !identifier.test(body.requestId)) {
     return json({ error: '消息标识无效，请刷新页面后重试' }, 400, headers);
   }
-  const text = typeof body.text === 'string' ? body.text.trim() : '';
-  if (!text || text.length > 300) return json({ error: '消息需为 1 至 300 个字符' }, 400, headers);
+  const kind = body.kind === undefined ? 'text' : body.kind;
+  if (kind !== 'text' && kind !== 'voice') return json({ error: '不支持的消息类型' }, 400, headers);
+  const nickname = body.nickname === undefined ? '' : typeof body.nickname === 'string' ? body.nickname.trim() : null;
+  if (nickname === null || nickname.length > 24) return json({ error: '昵称最多为 24 个字符' }, 400, headers);
+  let voiceId = null, text;
+  if (kind === 'voice') {
+    if (typeof body.voiceId !== 'string' || !Object.prototype.hasOwnProperty.call(CHAT_VOICES, body.voiceId)) {
+      return json({ error: '请选择提供的快捷语音' }, 400, headers);
+    }
+    voiceId = body.voiceId;
+    text = CHAT_VOICES[voiceId].label;
+  } else {
+    if (body.voiceId !== undefined && body.voiceId !== null) return json({ error: '文字消息不能包含语音标识' }, 400, headers);
+    text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!text || text.length > 500) return json({ error: '消息需为 1 至 500 个字符' }, 400, headers);
+  }
 
   // A repeated send with the same key returns the original row, including its
   // server timestamp. The unique index also handles concurrent retries.
-  const insert = env.DB.prepare('INSERT OR IGNORE INTO chat_messages (client_id, request_id, text, created_at) VALUES (?, ?, ?, ?)')
-    .bind(body.clientId, body.requestId, text, new Date().toISOString());
+  const insert = env.DB.prepare('INSERT OR IGNORE INTO chat_messages (client_id, request_id, text, created_at, kind, voice_id, nickname) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(body.clientId, body.requestId, text, new Date().toISOString(), kind, voiceId, nickname);
   const lookup = env.DB.prepare(`SELECT ${columns} FROM chat_messages WHERE client_id = ? AND request_id = ?`)
     .bind(body.clientId, body.requestId);
   const [, saved] = await env.DB.batch([insert, lookup]);
   const row = saved.results[0];
   if (!row) throw new Error('Saved chat message was not found');
-  if (row.text !== text) return json({ error: '此消息已发送，请勿使用同一标识发送不同内容' }, 409, headers);
+  if (row.text !== text || row.kind !== kind || row.voice_id !== voiceId || row.nickname !== nickname) {
+    return json({ error: '此消息已发送，请勿使用同一标识发送不同内容' }, 409, headers);
+  }
   return json({ message: message(row) }, 200, headers);
 }

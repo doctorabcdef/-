@@ -41,7 +41,7 @@ export function d1(database) {
     } catch (error) { database.exec('ROLLBACK'); throw error; }
   } };
 }
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
+const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.m4a': 'audio/mp4' };
 const root = resolve('.');
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost:5187');
@@ -59,8 +59,23 @@ const server = createServer(async (req, res) => {
   try {
     const name = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
     const path = resolve(root, `.${name}`);
-    if (!path.startsWith(root + sep) || name.includes('/.') || !['.html', '.js', '.css', '.svg'].includes(extname(path))) throw new Error('Blocked');
-    const content = await readFile(path); res.writeHead(200, { 'Content-Type': types[extname(path)], 'Cache-Control': 'no-store' }); res.end(content);
+    if (!path.startsWith(root + sep) || name.includes('/.') || !Object.hasOwn(types, extname(path))) throw new Error('Blocked');
+    const content = await readFile(path);
+    const headers = { 'Content-Type': types[extname(path)], 'Cache-Control': 'no-store', 'Content-Length': content.length };
+    if (extname(path) === '.m4a') {
+      headers['Accept-Ranges'] = 'bytes';
+      if (req.headers.range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+        const start = match?.[1] ? Number(match[1]) : match?.[2] ? Math.max(0, content.length - Number(match[2])) : NaN;
+        const end = match?.[1] && match[2] ? Math.min(Number(match[2]), content.length - 1) : content.length - 1;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= content.length) {
+          res.writeHead(416, { 'Content-Range': `bytes */${content.length}` }); res.end(); return;
+        }
+        res.writeHead(206, { ...headers, 'Content-Length': end - start + 1, 'Content-Range': `bytes ${start}-${end}/${content.length}` });
+        res.end(content.subarray(start, end + 1)); return;
+      }
+    }
+    res.writeHead(200, headers); res.end(content);
   } catch { res.writeHead(404); res.end('Not found'); }
 });
 server.listen(5187, '127.0.0.1', () => console.log('Go preview: http://127.0.0.1:5187'));

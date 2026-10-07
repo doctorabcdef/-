@@ -1,8 +1,12 @@
 import { requestJson } from './http.js';
 import { createAutoRefresh } from './poll.js';
+import { CHAT_VOICES } from './chat-voices.js';
 
 const CLIENT_KEY = 'yijian:chat-client:v1';
+const NICKNAME_KEY = 'yijian:chat-nickname:v1';
 const idPattern = /^[a-f0-9]{32}$/i;
+const voiceClip = id => typeof id === 'string' && Object.prototype.hasOwnProperty.call(CHAT_VOICES, id) ? CHAT_VOICES[id] : null;
+const normalizeMessage = message => ({ ...message, kind: message.kind ?? 'text', voiceId: message.voiceId ?? null, nickname: message.nickname ?? '' });
 function randomId() {
   return [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, '0')).join('');
 }
@@ -17,7 +21,10 @@ function deviceId() {
 function validMessage(message) {
   return Number.isSafeInteger(message?.id) && message.id > 0 && idPattern.test(message.clientId) &&
     idPattern.test(message.requestId) && typeof message.text === 'string' && message.text.length > 0 &&
-    message.text.length <= 300 && typeof message.createdAt === 'string' && Number.isFinite(Date.parse(message.createdAt));
+    message.text.length <= 500 && typeof message.createdAt === 'string' && Number.isFinite(Date.parse(message.createdAt)) &&
+    (message.nickname === undefined || typeof message.nickname === 'string' && message.nickname.length <= 24) &&
+    ((message.kind ?? 'text') === 'text' && (message.voiceId === undefined || message.voiceId === null) ||
+      message.kind === 'voice' && !!voiceClip(message.voiceId) && message.text === voiceClip(message.voiceId).label);
 }
 
 export function mountChat({ api }) {
@@ -35,31 +42,76 @@ export function mountChat({ api }) {
 
 function createChat(panel, api) {
   const $ = id => panel.querySelector(`#${id}`);
-  const log = $('chat-messages'), input = $('chat-input'), clientId = deviceId();
+  const log = $('chat-messages'), input = $('chat-input'), nickname = $('chat-nickname'), audio = $('chat-audio'), clientId = deviceId();
+  try { nickname.value = (localStorage.getItem(NICKNAME_KEY) || '').slice(0, 24); } catch { /* Nicknames still work for this visit. */ }
   const messages = new Map(), pending = new Map(), outbox = [], listeners = [];
   let online = false, initialized = false, connectionError = '', destroyed = false, suspended = false;
   let reading = null, sending = false, loadingOlder = false, wantsOlder = false;
   let oldest = null, cursor = 0, hasOlder = false, unread = 0, sequence = 0, composing = false;
+  let hasSent = false, playbackError = '', playbackKey = null, playbackState = 'idle', playbackVersion = 0;
   const connected = () => navigator.onLine !== false;
   const available = () => !destroyed && !suspended && connected() && !document.hidden;
   const bind = (target, event, handler) => { target.addEventListener(event, handler); listeners.push(() => target.removeEventListener(event, handler)); };
   const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 36;
   const setText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
   function updateControls() {
-    $('chat-send').disabled = composing || !input.value.trim() || input.value.length > 300;
-    setText($('chat-count'), `${input.value.length} / 300`);
+    $('chat-send').disabled = composing || !input.value.trim() || input.value.length > 500;
+    setText($('chat-count'), `${input.value.length} / 500`);
     $('chat-older').classList.toggle('hidden', !hasOlder);
     $('chat-older').disabled = loadingOlder || wantsOlder;
     setText($('chat-older'), loadingOlder || wantsOlder ? '正在加载…' : '加载更早消息');
     panel.querySelectorAll('[data-chat-send]').forEach(button => {
-      button.disabled = [...pending.values()].some(message => message.status === 'sending' && message.text === button.dataset.chatSend);
+      button.disabled = [...pending.values()].some(message => message.status === 'sending' && message.kind === 'text' && message.text === button.dataset.chatSend);
     });
-    setText($('chat-status'), online ? '已连接' : connectionError ? '连接中断' : '连接中');
+    panel.querySelectorAll('[data-chat-voice]').forEach(button => {
+      button.disabled = [...pending.values()].some(message => message.status === 'sending' && message.kind === 'voice' && message.voiceId === button.dataset.chatVoice);
+    });
+    const hasSending = [...pending.values()].some(message => message.status === 'sending');
+    setText($('chat-status'), hasSending ? '正在发送…' : online ? hasSent ? '消息已发送' : '已连接' : connectionError ? '连接中断' : '连接中');
     $('chat-status').dataset.state = online ? 'online' : connectionError ? 'error' : 'loading';
-    setText($('chat-error'), connectionError);
-    $('chat-error').classList.toggle('hidden', !connectionError);
+    setText($('chat-error'), playbackError || connectionError);
+    $('chat-error').classList.toggle('hidden', !playbackError && !connectionError);
     $('chat-new').classList.toggle('hidden', !unread);
     setText($('chat-new'), unread ? `${unread} 条新消息 ↓` : '有新消息 ↓');
+  }
+  function updateVoiceButtons() {
+    log.querySelectorAll('[data-chat-play]').forEach(button => {
+      const clip = voiceClip(button.dataset.voiceId), active = button.closest('.chat-message').dataset.chatKey === playbackKey && playbackState !== 'idle';
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      button.setAttribute('aria-label', `${active ? '暂停' : '播放'}语音：${clip.label}`);
+      setText(button.querySelector('.chat-play-icon'), active ? 'Ⅱ' : '▶');
+      setText(button.querySelector('.chat-voice-detail'), `${Math.ceil(clip.durationSeconds)} 秒 · ${active ? playbackState === 'loading' ? '正在加载' : '正在播放' : '点击重播'}`);
+    });
+  }
+  function stopPlayback() {
+    playbackVersion++; playbackKey = null; playbackState = 'idle';
+    audio.pause();
+    try { audio.currentTime = 0; } catch { /* No metadata has loaded yet. */ }
+    updateVoiceButtons();
+  }
+  function playVoice(button) {
+    const clip = voiceClip(button.dataset.voiceId), key = button.closest('.chat-message')?.dataset.chatKey;
+    if (!clip || !key) return;
+    if (playbackKey === key && playbackState !== 'idle') { stopPlayback(); return; }
+    const version = ++playbackVersion;
+    audio.pause(); playbackKey = key; playbackState = 'loading'; playbackError = '';
+    const source = new URL(`../assets/voices/${clip.file}`, import.meta.url).href;
+    if (audio.src !== source) audio.src = source;
+    try { audio.currentTime = 0; } catch { /* play() loads the supplied recording. */ }
+    updateVoiceButtons(); updateControls();
+    const failed = () => {
+      if (version !== playbackVersion || destroyed) return;
+      playbackKey = null; playbackState = 'idle';
+      playbackError = '语音暂时无法播放，请检查网络后点击重试。';
+      updateVoiceButtons(); updateControls();
+    };
+    try {
+      // Calling play synchronously in this click handler preserves the user gesture.
+      Promise.resolve(audio.play()).then(() => {
+        if (version !== playbackVersion || destroyed) return;
+        playbackState = 'playing'; updateVoiceButtons();
+      }, failed);
+    } catch { failed(); }
   }
   function captureScroll() {
     const top = log.getBoundingClientRect().top;
@@ -74,14 +126,27 @@ function createChat(panel, api) {
       row.className = `chat-message${own ? ' own' : ''}`;
       row.dataset.chatKey = `${message.clientId}:${message.requestId}`;
       row.dataset.requestId = message.requestId;
+      row.dataset.messageKind = message.kind;
       if (message.id) row.dataset.messageId = message.id;
       const meta = document.createElement('div'); meta.className = 'chat-meta';
-      const sender = document.createElement('span'); sender.textContent = own ? '我' : `棋友 ${message.clientId.slice(-4)}`;
+      const sender = document.createElement('span'), name = message.nickname || `棋友 ${message.clientId.slice(-4)}`;
+      sender.textContent = own ? `我 · ${name}` : name;
       const time = document.createElement('time'); time.dateTime = message.createdAt;
       time.textContent = new Date(message.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
       meta.append(sender, time);
-      const text = document.createElement('p'); text.className = 'chat-text'; text.textContent = message.text;
-      row.append(meta, text);
+      row.append(meta);
+      if (message.kind === 'voice') {
+        const play = document.createElement('button'); play.type = 'button'; play.className = 'chat-voice-message';
+        play.dataset.chatPlay = message.requestId; play.dataset.voiceId = message.voiceId;
+        const icon = document.createElement('span'); icon.className = 'chat-play-icon'; icon.setAttribute('aria-hidden', 'true');
+        const copy = document.createElement('span'); copy.className = 'chat-voice-copy';
+        const text = document.createElement('span'); text.className = 'chat-text'; text.textContent = message.text;
+        const detail = document.createElement('span'); detail.className = 'chat-voice-detail';
+        copy.append(text, detail); play.append(icon, copy); row.append(play);
+      } else {
+        const text = document.createElement('p'); text.className = 'chat-text'; text.textContent = message.text;
+        row.append(text);
+      }
       const delivery = document.createElement('span'); delivery.className = 'chat-delivery';
       delivery.dataset.messageStatus = message.status || 'sent';
       if (own) {
@@ -110,13 +175,14 @@ function createChat(panel, api) {
       if (match) log.scrollTop += match.getBoundingClientRect().top - log.getBoundingClientRect().top - anchor.offset;
       if (!older) unread += additions;
     }
-    updateControls();
+    updateVoiceButtons(); updateControls();
   }
   function merge(incoming) {
     let additions = 0, changed = false;
-    for (const message of incoming) {
+    for (const raw of incoming) {
+      const message = normalizeMessage(raw);
       if (!messages.has(message.id)) { messages.set(message.id, message); additions++; changed = true; }
-      if (message.clientId === clientId && pending.delete(message.requestId)) { changed = true; additions = Math.max(0, additions - 1); }
+      if (message.clientId === clientId && pending.delete(message.requestId)) { hasSent = true; changed = true; additions = Math.max(0, additions - 1); }
     }
     return { additions, changed };
   }
@@ -168,11 +234,14 @@ function createChat(panel, api) {
         try {
           if (!connected()) throw new Error('设备已离线，恢复连接后可重试。');
           const response = await requestJson(api, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ clientId, requestId: item.requestId, text: item.text }), timeoutMs: 15000, keepalive: true });
+            body: JSON.stringify({ clientId, requestId: item.requestId, text: item.text, kind: item.kind, voiceId: item.voiceId, nickname: item.nickname }), timeoutMs: 15000, keepalive: true });
           if (!response.ok) throw new Error(response.data?.error || '消息未能发送，请重试。');
-          const message = response.data?.message;
-          if (!validMessage(message) || message.clientId !== clientId || message.requestId !== item.requestId || message.text !== item.text) throw new Error('发送结果尚未确认，请重试核对。');
-          merge([message]); online = true; connectionError = '';
+          const raw = response.data?.message;
+          if (!validMessage(raw)) throw new Error('发送结果尚未确认，请重试核对。');
+          const message = normalizeMessage(raw);
+          if (message.clientId !== clientId || message.requestId !== item.requestId || message.text !== item.text ||
+              message.kind !== item.kind || message.voiceId !== item.voiceId || message.nickname !== item.nickname) throw new Error('发送结果尚未确认，请重试核对。');
+          merge([message]); online = true; connectionError = ''; hasSent = true;
         } catch (error) {
           // A GET may already have confirmed a POST whose response was lost.
           if (pending.has(item.requestId)) {
@@ -184,11 +253,12 @@ function createChat(panel, api) {
       }
     } finally { sending = false; if (!destroyed) updateControls(); }
   }
-  function send(text, clearInput = false) {
+  function send(text, clearInput = false, voiceId = null) {
     const value = text.trim();
-    if (!value || value.length > 300 || destroyed) return;
+    if (!value || value.length > 500 || destroyed || voiceId !== null && !voiceClip(voiceId)) return;
     const requestId = randomId();
-    pending.set(requestId, { clientId, requestId, text: value, createdAt: new Date().toISOString(), status: 'sending', sequence: sequence++ });
+    pending.set(requestId, { clientId, requestId, text: value, kind: voiceId ? 'voice' : 'text', voiceId,
+      nickname: nickname.value.trim().slice(0, 24), createdAt: new Date().toISOString(), status: 'sending', sequence: sequence++ });
     if (clearInput) input.value = '';
     outbox.push(requestId); render({ additions: 1 }); void flush();
   }
@@ -196,6 +266,9 @@ function createChat(panel, api) {
     isVisible: () => !document.hidden && !suspended, isConnected: connected });
   bind($('chat-form'), 'submit', event => { event.preventDefault(); if (!composing) send(input.value, true); });
   bind(input, 'input', updateControls);
+  const saveNickname = () => { try { localStorage.setItem(NICKNAME_KEY, nickname.value.slice(0, 24)); } catch { /* The current nickname remains usable. */ } };
+  bind(nickname, 'input', saveNickname); bind(nickname, 'change', saveNickname);
+  bind(nickname, 'keydown', event => { if (event.key === 'Enter') event.preventDefault(); });
   bind(input, 'compositionstart', () => { composing = true; updateControls(); });
   bind(input, 'compositionend', () => { composing = false; updateControls(); });
   bind(input, 'keydown', event => {
@@ -204,6 +277,14 @@ function createChat(panel, api) {
     }
   });
   bind(panel, 'click', event => {
+    const play = event.target.closest('[data-chat-play]');
+    if (play) { playVoice(play); return; }
+    const voice = event.target.closest('[data-chat-voice]');
+    if (voice && !voice.disabled) {
+      const clip = voiceClip(voice.dataset.chatVoice);
+      if (clip) send(clip.label, false, voice.dataset.chatVoice);
+      return;
+    }
     const quick = event.target.closest('[data-chat-send]');
     if (quick && !quick.disabled) { send(quick.dataset.chatSend); return; }
     const retry = event.target.closest('[data-chat-retry]');
@@ -219,9 +300,17 @@ function createChat(panel, api) {
   bind(document, 'visibilitychange', () => { if (document.hidden) auto.stop(); else auto.wake(); });
   bind(window, 'focus', () => auto.wake());
   bind(window, 'online', () => auto.wake());
-  bind(window, 'pagehide', () => { suspended = true; auto.stop(); });
+  bind(window, 'pagehide', () => { suspended = true; auto.stop(); stopPlayback(); });
   bind(window, 'pageshow', event => { if (event.persisted) { suspended = false; auto.wake(); } });
   bind(window, 'offline', () => { auto.stop(); reading?.abort(); online = false; connectionError = '设备已离线，已显示的消息仍可查看。'; updateControls(); });
+  bind(audio, 'ended', () => { playbackVersion++; playbackKey = null; playbackState = 'idle'; updateVoiceButtons(); });
+  bind(audio, 'pause', () => { if (audio.paused && playbackState === 'playing') { playbackState = 'idle'; updateVoiceButtons(); } });
+  bind(audio, 'error', () => {
+    if (!playbackKey || destroyed) return;
+    playbackVersion++; playbackKey = null; playbackState = 'idle';
+    playbackError = '语音暂时无法播放，请检查网络后点击重试。';
+    updateVoiceButtons(); updateControls();
+  });
   updateControls(); void refresh(); auto.start();
-  return { refresh, destroy() { destroyed = true; auto.stop(); reading?.abort(); listeners.forEach(remove => remove()); } };
+  return { refresh, destroy() { destroyed = true; auto.stop(); reading?.abort(); stopPlayback(); listeners.forEach(remove => remove()); } };
 }
