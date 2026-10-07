@@ -63,9 +63,7 @@ function createChat(panel, api) {
     panel.querySelectorAll('[data-chat-send]').forEach(button => {
       button.disabled = [...pending.values()].some(message => message.status === 'sending' && message.kind === 'text' && message.text === button.dataset.chatSend);
     });
-    panel.querySelectorAll('[data-chat-voice]').forEach(button => {
-      button.disabled = [...pending.values()].some(message => message.status === 'sending' && message.kind === 'voice' && message.voiceId === button.dataset.chatVoice);
-    });
+    // Voice shortcuts stay available while earlier messages save in the outbox.
     const hasSending = [...pending.values()].some(message => message.status === 'sending');
     setText($('chat-status'), hasSending ? '正在发送…' : online ? hasSent ? '消息已发送' : '已连接' : connectionError ? '连接中断' : '连接中');
     $('chat-status').dataset.state = online ? 'online' : connectionError ? 'error' : 'loading';

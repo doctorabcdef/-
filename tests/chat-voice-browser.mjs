@@ -18,7 +18,7 @@ const messages = [
   { id: 1, clientId: hex(1), requestId: hex(101), text: '之前的聊天记录仍然保留。', createdAt: '2026-10-07T08:00:00.000Z' },
   { id: 2, clientId: hex(2), requestId: hex(102), text: '轮到你落子啦。', createdAt: '2026-10-07T08:01:00.000Z' },
 ];
-const posts = [], errors = [], unexpected = [], audioResponses = [], immediatePlayback = [];
+const posts = [], errors = [], unexpected = [], audioResponses = [], immediatePlayback = [], rapidClicks = [];
 const postGates = new Map();
 const fulfill = (route, data) => route.fulfill({ contentType: 'application/json', headers, body: JSON.stringify(data) });
 
@@ -142,6 +142,48 @@ async function sendVoiceAndPlay(page, receiver, device, voiceId) {
   assert.equal(await playbackCount(page), beforeOwn + 1, 'Cloud acknowledgement must not start the recording again');
   assert.equal(await playbackCount(receiver), beforeReceived, 'Receiving another device\'s message must not autoplay');
   return body;
+}
+async function sendRapidVoices(page, receiver, device) {
+  const sequence = ['too-slow', 'too-slow', 'too-slow', 'hurry-up'];
+  const gate = { replied: false };
+  gate.promise = new Promise(resolve => { gate.release = resolve; });
+  for (const voiceId of Object.keys(voices)) postGates.set(`${device}:${voiceId}`, gate);
+  const beforePosts = posts.length, beforeReceived = await playbackCount(receiver);
+  let pending;
+  try {
+    for (const voiceId of sequence) {
+      const button = page.locator(`[data-chat-voice="${voiceId}"]`);
+      assert.equal(await button.isEnabled(), true, 'A pending send must not disable repeated voice clicks');
+      await button.click();
+    }
+    assert.equal(await page.locator('[data-chat-voice]').evaluateAll(buttons => buttons.every(button => !button.disabled)), true);
+    pending = await page.locator('#chat-messages [data-request-id]').evaluateAll(rows => rows
+      .filter(row => row.querySelector('[data-message-status]')?.dataset.messageStatus === 'sending')
+      .map(row => ({ requestId: row.dataset.requestId, voiceId: row.querySelector('[data-voice-id]')?.dataset.voiceId })));
+    assert.deepEqual(pending.map(message => message.voiceId), sequence, 'Every rapid click must get a separate pending bubble');
+    assert.equal(new Set(pending.map(message => message.requestId)).size, sequence.length);
+    await page.waitForFunction(filename => {
+      const audio = document.getElementById('chat-audio');
+      return audio.currentSrc.endsWith(`/assets/voices/${filename}`) && !audio.paused && audio.currentTime > 0.02;
+    }, voices['hurry-up'].filename);
+    assert.equal(posts.length, beforePosts + 1, 'The first held POST must keep later saves queued in order');
+    assert.equal(gate.replied, false, 'The latest clicked recording must play before any queued save completes');
+    assert.equal(await page.locator('audio').count(), 1);
+    await page.waitForFunction(() => document.getElementById('chat-audio').ended, null, { timeout: 10000 });
+  } finally {
+    gate.release();
+    for (const voiceId of Object.keys(voices)) postGates.delete(`${device}:${voiceId}`);
+  }
+  for (const message of pending) {
+    await waitSent(page, message.requestId);
+    await waitSent(receiver, message.requestId);
+    assert.equal(messages.filter(saved => saved.requestId === message.requestId).length, 1, 'Each queued voice must be stored exactly once');
+    assert.equal(await row(page, message.requestId).count(), 1);
+    assert.equal(await row(receiver, message.requestId).count(), 1);
+  }
+  assert.deepEqual(posts.slice(beforePosts).map(message => message.requestId), pending.map(message => message.requestId), 'All rapid clicks must save in order without loss or extra requests');
+  assert.equal(await playbackCount(receiver), beforeReceived, 'Rapidly received voice messages must remain silent');
+  rapidClicks.push({ device, clicked: sequence.length, saved: pending.length, latestAudioBeforeQueueSaved: 'hurry-up' });
 }
 async function assertLayout(page) {
   const result = await page.evaluate(() => {
@@ -275,6 +317,9 @@ try {
   assert.equal(await page.locator('#chat-nickname').inputValue(), '改名后的棋友', 'Desktop nickname persists locally');
   assert.equal(await phone.locator('#chat-nickname').inputValue(), '手机棋友', 'Another device retains its own nickname');
 
+  await sendRapidVoices(page, phone, 'desktop');
+  await sendRapidVoices(phone, page, 'mobile');
+
   const playback = [];
   for (const message of [firstVoice, secondVoice]) {
     const result = await Promise.all([playAndReplay(page, message), playAndReplay(phone, message)]);
@@ -306,6 +351,6 @@ try {
   await page.locator('#chat-panel').screenshot({ path: '.artifacts/chat-voice-card-desktop.png' });
   await phone.locator('#chat-panel').screenshot({ path: '.artifacts/chat-voice-card-mobile.png' });
   console.log(JSON.stringify({ result: 'Voice chat browser checks passed', base, mockedApiOnly: true, actualAudio: true,
-    sentMessages: posts.length, immediatePlayback, playback, checked: ['legacy history', 'voice mapping', 'nickname snapshots/local persistence', 'text quick phrases', '500-character cross-device history', 'draft retention', 'shortcut playback before POST confirmation', 'no received/history autoplay', 'real audio playback/replay', 'single-player switching', '320/390/540/768px layout', 'missing AbortSignal statics', 'page errors'],
+    sentMessages: posts.length, immediatePlayback, rapidClicks, playback, checked: ['legacy history', 'voice mapping', 'nickname snapshots/local persistence', 'text quick phrases', '500-character cross-device history', 'draft retention', 'shortcut playback before POST confirmation', 'rapid repeated/switching voice clicks while saves queued', 'no received/history autoplay', 'real audio playback/replay', 'single-player switching', '320/390/540/768px layout', 'missing AbortSignal statics', 'page errors'],
     screenshots: ['chat-voice-desktop.png', 'chat-voice-mobile.png', 'chat-voice-card-desktop.png', 'chat-voice-card-mobile.png'] }));
 } finally { await browser.close(); }
