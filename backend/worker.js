@@ -1,4 +1,5 @@
 import { createGame, applyAction, publicState } from '../src/engine.js';
+import { handleChat } from './chat.js';
 
 const ALLOWED_ORIGINS = new Set(['https://doctorabcdef.github.io']);
 const json = (body, status = 200, extra = {}) => new Response(JSON.stringify(body), {
@@ -15,9 +16,10 @@ export async function handleRequest(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
   const url = new URL(request.url);
   if (url.pathname === '/health') return json({ ok: true, service: 'yijian-go' }, 200, headers);
-  if (url.pathname !== '/api/game') return json({ error: '未找到接口' }, 404, headers);
+  if (!['/api/game', '/api/chat'].includes(url.pathname)) return json({ error: '未找到接口' }, 404, headers);
   if (!['GET', 'POST'].includes(request.method)) return json({ error: '不支持的请求方式' }, 405, headers);
   try {
+    if (url.pathname === '/api/chat') return await handleChat(request, env, headers);
     const requestedRevision = url.searchParams.get('revision');
     const knownRevision = request.method === 'GET' && /^\d+$/.test(requestedRevision || '') && Number.isSafeInteger(Number(requestedRevision))
       ? Number(requestedRevision) : -1;
@@ -64,8 +66,10 @@ export async function handleRequest(request, env) {
     if (!updated.meta.changes) return json({ error: '棋局刚刚有了新变化，请刷新后重试' }, 409, headers);
     return json({ revision: row.revision + 1, updatedAt, game: publicState(next) }, 200, headers);
   } catch (error) {
-    console.error('Game storage unavailable:', error.message);
-    return json({ error: '云端暂时无法连接，请稍后重试。已保存的棋局不会被覆盖。' }, 503, headers);
+    console.error('Cloud storage unavailable:', error.message);
+    return json({ error: url.pathname === '/api/chat'
+      ? '聊天记录暂时无法连接，请稍后重试。'
+      : '云端暂时无法连接，请稍后重试。已保存的棋局不会被覆盖。' }, 503, headers);
   }
 }
 

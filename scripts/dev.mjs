@@ -6,12 +6,40 @@ import { handleRequest } from '../backend/worker.js';
 
 await mkdir('.artifacts', { recursive: true });
 const db = new DatabaseSync('.artifacts/dev.sqlite');
-db.exec('CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, updated_at TEXT NOT NULL)');
+const journal = JSON.parse(await readFile('backend/drizzle/meta/_journal.json', 'utf8'));
+db.exec('CREATE TABLE IF NOT EXISTS _dev_migrations (name TEXT PRIMARY KEY)');
+for (const entry of journal.entries) {
+  if (db.prepare('SELECT name FROM _dev_migrations WHERE name = ?').get(entry.tag)) continue;
+  // Adopt the games table created by earlier versions of this local dev server.
+  const legacy = entry.idx === 0 && db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'games'").get();
+  const sql = legacy ? '' : await readFile(`backend/drizzle/${entry.tag}.sql`, 'utf8');
+  db.exec('BEGIN');
+  try {
+    if (sql) db.exec(sql);
+    db.prepare('INSERT INTO _dev_migrations (name) VALUES (?)').run(entry.tag);
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
 export function d1(database) {
-  return { prepare(sql) { return { bind(...args) { return {
-    async first() { return database.prepare(sql).get(...args) || null; },
-    async run() { const result = database.prepare(sql).run(...args); return { meta: { changes: result.changes } }; },
-  }; } }; } };
+  function statement(sql, args = []) {
+    return {
+      bind(...values) { return statement(sql, values); },
+      async first() { return database.prepare(sql).get(...args) || null; },
+      async all() { return { results: database.prepare(sql).all(...args) }; },
+      async run() { return { meta: { changes: database.prepare(sql).run(...args).changes } }; },
+      execute() {
+        const query = database.prepare(sql);
+        return query.columns().length ? { results: query.all(...args) } : { meta: { changes: query.run(...args).changes } };
+      },
+    };
+  }
+  return { prepare: statement, async batch(statements) {
+    database.exec('BEGIN');
+    try {
+      const results = statements.map(query => query.execute());
+      database.exec('COMMIT'); return results;
+    } catch (error) { database.exec('ROLLBACK'); throw error; }
+  } };
 }
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const root = resolve('.');

@@ -13,7 +13,7 @@ const archive = resolve('.artifacts/cloud.tar.gz');
 const packed = spawnSync('tar.exe', ['-czf', archive, '-C', stage, 'dist'], { encoding: 'utf8', windowsHide: true });
 if (packed.status !== 0) throw new Error(packed.stderr || 'Archive creation failed');
 const listing = spawnSync('tar.exe', ['-tzf', archive], { encoding: 'utf8', windowsHide: true });
-for (const required of ['dist/server/index.js', 'dist/server/engine.js', 'dist/.openai/hosting.json', 'dist/.openai/drizzle/']) {
+for (const required of ['dist/server/index.js', 'dist/server/engine.js', 'dist/server/chat.js', 'dist/.openai/hosting.json', 'dist/.openai/drizzle/']) {
   if (!listing.stdout.includes(required)) throw new Error(`Missing archive member: ${required}`);
 }
 const commit = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).stdout.trim();

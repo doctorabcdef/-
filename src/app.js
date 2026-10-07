@@ -3,6 +3,7 @@ import { API_BASE } from './config.js';
 import { createGameSync } from './sync.js';
 import { requestJson } from './http.js';
 import { createAutoRefresh } from './poll.js';
+import { mountChat } from './chat.js';
 
 const $ = id => document.getElementById(id);
 const local = ['localhost', '127.0.0.1'].includes(location.hostname);
@@ -272,3 +273,5 @@ window.addEventListener('pageshow', event => { if (event.persisted) autoSync.wak
 window.addEventListener('beforeunload', event => {
   if (busy) { event.preventDefault(); event.returnValue = ''; }
 });
+try { mountChat({ api: local ? '/api/chat' : `${API_BASE}/api/chat` }); }
+catch { $('chat-status').textContent = '聊天暂时不可用，请刷新重试'; }

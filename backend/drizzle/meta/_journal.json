@@ -8,6 +8,13 @@
       "when": 1790652892049,
       "tag": "0000_bored_squadron_sinister",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1791358622813,
+      "tag": "0001_persistent_chat",
+      "breakpoints": true
     }
   ]
 }
