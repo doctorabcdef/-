@@ -4,7 +4,6 @@ import { CHAT_VOICES } from './chat-voices.js';
 
 const CLIENT_KEY = 'yijian:chat-client:v1';
 const NICKNAME_KEY = 'yijian:chat-nickname:v1';
-const SOUND_KEY = 'yijian:chat-muted:v1';
 // 40 ms of silent PCM audio. Play on the same element in a real user gesture.
 const SILENT_AUDIO = 'data:audio/wav;base64,UklGRmQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YUABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
 const idPattern = /^[a-f0-9]{32}$/i;
@@ -50,14 +49,13 @@ function createChat(panel, api) {
   const messages = new Map(), pending = new Map(), outbox = [], listeners = [];
   // This page's sends only: another tab may share our clientId and must still be heard.
   const sentHere = new Set(), incomingVoices = [];
-  let soundMuted = false, soundReady = false, soundBlocked = false, playbackRemote = false;
-  try { soundMuted = localStorage.getItem(SOUND_KEY) === '1'; } catch { /* Use this visit's preference. */ }
+  let soundReady = false, soundBlocked = false, playbackRemote = false;
   let online = false, initialized = false, connectionError = '', destroyed = false, suspended = false;
   let reading = null, sending = false, loadingOlder = false, wantsOlder = false;
   let oldest = null, cursor = 0, hasOlder = false, unread = 0, sequence = 0, composing = false;
   let hasSent = false, playbackError = '', playbackKey = null, playbackVoiceId = null, playbackState = 'idle', playbackVersion = 0;
   const connected = () => navigator.onLine !== false;
-  const chatActive = () => !suspended && (!document.hidden || !soundMuted);
+  const chatActive = () => !suspended;
   const available = () => !destroyed && connected() && chatActive();
   const bind = (target, event, handler) => { target.addEventListener(event, handler); listeners.push(() => target.removeEventListener(event, handler)); };
   const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 36;
@@ -79,12 +77,8 @@ function createChat(panel, api) {
     $('chat-error').classList.toggle('hidden', !playbackError && !connectionError);
     $('chat-new').classList.toggle('hidden', !unread);
     setText($('chat-new'), unread ? `${unread} 条新消息 ↓` : '有新消息 ↓');
-    const audible = !soundMuted && soundReady && !soundBlocked;
-    setText($('chat-sound-toggle'), audible ? '声音已开启' : '开启声音');
-    $('chat-sound-toggle').setAttribute('aria-pressed', String(audible));
-    $('chat-sound-toggle').setAttribute('aria-label', audible ? '关闭接收语音的声音' : '开启接收语音的声音');
-    setText($('chat-sound-hint'), soundMuted ? '已静音，点击开启后接收新语音。' : soundBlocked ?
-      '浏览器暂未允许出声，请点击开启声音。' : audible ? '其他设备发送语音时，这里也会播放。' : '每台设备点一次，接收其他设备的声音。');
+    setText($('chat-sound-hint'), soundBlocked ? '浏览器暂未允许出声，轻点页面任意位置即可播放。' : '');
+    $('chat-sound-hint').classList.toggle('hidden', !soundBlocked);
   }
   function updateVoiceButtons() {
     log.querySelectorAll('[data-chat-play]').forEach(button => {
@@ -103,7 +97,7 @@ function createChat(panel, api) {
     updateVoiceButtons();
   }
   function drainIncoming() {
-    if (destroyed || suspended || soundMuted || soundBlocked || playbackState !== 'idle') return;
+    if (destroyed || suspended || soundBlocked || playbackState !== 'idle') return;
     const next = incomingVoices.shift();
     if (next) playVoice(next.voiceId, next.key, true);
   }
@@ -124,7 +118,7 @@ function createChat(panel, api) {
       playbackKey = null; playbackVoiceId = null; playbackState = 'idle'; playbackRemote = false;
       if (error?.name === 'NotAllowedError') {
         soundBlocked = true; soundReady = false;
-        if (remote && !soundMuted) incomingVoices.unshift({ voiceId, key });
+        if (remote) incomingVoices.unshift({ voiceId, key });
       } else playbackError = '语音暂时无法播放，请检查网络后点击重试。';
       updateVoiceButtons(); updateControls();
       drainIncoming();
@@ -139,8 +133,7 @@ function createChat(panel, api) {
     } catch (error) { failed(error); }
   }
   function enableSound() {
-    soundMuted = false; soundBlocked = false; playbackError = '';
-    try { localStorage.setItem(SOUND_KEY, '0'); } catch { /* Keep the preference in memory. */ }
+    soundBlocked = false; playbackError = '';
     if (playbackState === 'playing') { soundReady = true; updateControls(); return; }
     soundReady = false;
     // A loading remote message has already left the queue; retry it in this gesture.
@@ -151,9 +144,11 @@ function createChat(panel, api) {
     playbackState = 'unlocking';
     audio.src = SILENT_AUDIO;
     updateControls();
-    const failed = () => {
+    const failed = error => {
       if (version !== playbackVersion || destroyed) return;
-      playbackState = 'idle'; soundReady = false; soundBlocked = true;
+      playbackState = 'idle'; soundReady = false;
+      soundBlocked = error?.name === 'NotAllowedError';
+      if (!soundBlocked) playbackError = '语音暂时无法播放，请检查网络后点击重试。';
       updateControls();
     };
     try {
@@ -162,16 +157,17 @@ function createChat(panel, api) {
         playbackState = 'idle'; soundReady = true; soundBlocked = false;
         audio.pause(); updateControls(); drainIncoming();
       }, failed);
-    } catch { failed(); }
+    } catch (error) { failed(error); }
   }
-  function toggleSound() {
-    if (!soundMuted && soundReady && !soundBlocked) {
-      soundMuted = true; incomingVoices.length = 0;
-      try { localStorage.setItem(SOUND_KEY, '1'); } catch { /* Keep the preference in memory. */ }
-      if (playbackRemote) stopPlayback();
-      updateControls();
-    } else enableSound();
-    if (chatActive()) auto.wake(); else auto.stop();
+  function unlockOnInteraction(event) {
+    if (!event.isTrusted || destroyed || suspended || soundReady && !soundBlocked ||
+        playbackState === 'playing' || playbackState === 'unlocking') return;
+    // These controls play directly in their own click handler. Never replace
+    // their recording with the silent unlock clip, including on touchend.
+    if (event.target.closest?.('[data-chat-voice], [data-chat-play]') || playbackKey && !playbackRemote) return;
+    if (event.type === 'keydown' && (event.repeat || event.isComposing || event.keyCode === 229 ||
+        event.ctrlKey || event.metaKey || event.altKey || ['Control', 'Shift', 'Alt', 'Meta', 'Escape'].includes(event.key))) return;
+    enableSound();
   }
   function captureScroll() {
     const top = log.getBoundingClientRect().top;
@@ -244,7 +240,7 @@ function createChat(panel, api) {
       if (!messages.has(message.id)) {
         messages.set(message.id, message); additions++; changed = true;
         const key = `${message.clientId}:${message.requestId}`;
-        if (live && !soundMuted && message.kind === 'voice' && !sentHere.has(key)) {
+        if (live && message.kind === 'voice' && !sentHere.has(key)) {
           incomingVoices.push({ voiceId: message.voiceId, key });
         }
       }
@@ -333,7 +329,9 @@ function createChat(panel, api) {
   }
   const auto = createAutoRefresh({ refresh, getState: () => ({ online, refreshing: !!reading, busy: false }),
     isVisible: chatActive, isConnected: connected });
-  bind($('chat-sound-toggle'), 'click', toggleSound);
+  bind(document, 'click', unlockOnInteraction);
+  bind(document, 'touchend', unlockOnInteraction);
+  bind(document, 'keydown', unlockOnInteraction);
   bind($('chat-form'), 'submit', event => { event.preventDefault(); if (!composing) send(input.value, true); });
   bind(input, 'input', updateControls);
   const saveNickname = () => { try { localStorage.setItem(NICKNAME_KEY, nickname.value.slice(0, 24)); } catch { /* The current nickname remains usable. */ } };

@@ -42,7 +42,7 @@
       <section id="chat-panel" class="chat-panel" aria-labelledby="chat-title">
         <div class="chat-heading"><h2 id="chat-title">棋间聊两句</h2><span class="chat-eyebrow">CHAT</span></div>
         <p class="chat-description">历史消息自动保存，所有访客可见。</p>
-        <div class="chat-sound"><button id="chat-sound-toggle" type="button" aria-pressed="false">开启声音</button><span id="chat-sound-hint" role="status">每台设备点一次，接收其他设备的声音。</span></div>
+        <p id="chat-sound-hint" class="chat-sound-hint hidden" role="status"></p>
         <div class="chat-history"><button id="chat-older" type="button" class="chat-older hidden">加载更早消息</button><div id="chat-messages" class="chat-messages" role="log" aria-label="公共聊天消息" aria-live="polite" aria-relevant="additions" tabindex="0"><p class="chat-empty">正在加载聊天记录…</p></div><button id="chat-new" type="button" class="chat-new hidden">有新消息 ↓</button></div>
         <div class="chat-quick" role="group" aria-label="一键发送常用语">
           <button type="button" data-chat-send="太慢了">太慢了</button><button type="button" data-chat-send="搞快点好不">搞快点好不</button>
