@@ -6,7 +6,8 @@ import { createGame, publicState } from '../src/engine.js';
 // All API traffic is isolated, including on GO_TEST_BASE=production. Audio files
 // are fetched normally: these checks exercise real AAC decoding and playback.
 const base = process.env.GO_TEST_BASE || 'http://127.0.0.1:5187';
-const browser = await chromium.launch({ executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true });
+const browser = await chromium.launch({ executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true,
+  args: ['--autoplay-policy=document-user-activation-required'] });
 const headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' };
 const voices = {
   'too-slow': { text: '太慢了太慢了', filename: 'too-slow.m4a', duration: 1.109333 },
@@ -14,10 +15,12 @@ const voices = {
 };
 const hex = number => number.toString(16).padStart(32, '0');
 // Legacy responses deliberately omit the newly added fields.
-const messages = [
-  { id: 1, clientId: hex(1), requestId: hex(101), text: '之前的聊天记录仍然保留。', createdAt: '2026-10-07T08:00:00.000Z' },
-  { id: 2, clientId: hex(2), requestId: hex(102), text: '轮到你落子啦。', createdAt: '2026-10-07T08:01:00.000Z' },
-];
+const messages = Array.from({ length: 65 }, (_, index) => ({ id: index + 1, clientId: hex(index % 2 + 1),
+  requestId: hex(index + 101), text: index ? `历史消息 ${index + 1}` : '之前的聊天记录仍然保留。',
+  createdAt: '2026-10-07T08:00:00.000Z' }));
+for (const [index, voiceId] of [[1, 'too-slow'], [62, 'hurry-up']]) {
+  Object.assign(messages[index], { kind: 'voice', voiceId, text: voices[voiceId].text, nickname: '历史棋友' });
+}
 const posts = [], errors = [], unexpected = [], audioResponses = [], immediatePlayback = [], rapidClicks = [];
 const postGates = new Map();
 const fulfill = (route, data) => route.fulfill({ contentType: 'application/json', headers, body: JSON.stringify(data) });
@@ -27,8 +30,11 @@ async function prepare(name, options) {
   await context.addInitScript(() => {
     for (const method of ['any', 'timeout']) Object.defineProperty(AbortSignal, method, { configurable: true, writable: true, value: undefined });
     window.chatPlaybackEvents = [];
-    document.addEventListener('playing', event => {
-      if (event.target instanceof HTMLMediaElement) window.chatPlaybackEvents.push({ src: event.target.currentSrc, at: performance.now() });
+    window.chatEndedEvents = [];
+    for (const type of ['playing', 'ended']) document.addEventListener(type, event => {
+      if (event.target instanceof HTMLMediaElement && /\/assets\/voices\/[^/]+\.m4a$/.test(event.target.currentSrc)) {
+        (type === 'playing' ? window.chatPlaybackEvents : window.chatEndedEvents).push({ src: event.target.currentSrc, at: performance.now() });
+      }
     }, true);
   });
   await context.route('https://fonts.googleapis.com/**', route => route.abort());
@@ -105,11 +111,29 @@ async function sendByClick(page, selector) {
   return body;
 }
 const playbackCount = page => page.evaluate(() => window.chatPlaybackEvents.length);
-async function sendVoiceAndPlay(page, receiver, device, voiceId) {
+const playbackSnapshot = page => page.evaluate(() => ({ starts: window.chatPlaybackEvents.length, ends: window.chatEndedEvents.length }));
+async function enableSound(page) {
+  if (await page.locator('#chat-sound-toggle').getAttribute('aria-pressed') !== 'true') await page.locator('#chat-sound-toggle').click();
+  await page.waitForFunction(() => document.getElementById('chat-sound-toggle').getAttribute('aria-pressed') === 'true');
+  await page.waitForFunction(() => {
+    const audio = document.getElementById('chat-audio');
+    return !audio.src.startsWith('data:audio/wav') || audio.currentSrc.startsWith('data:audio/wav') && audio.readyState >= 1 && Number.isFinite(audio.duration);
+  });
+  const audio = await page.locator('#chat-audio').evaluate(element => ({ src: element.currentSrc, duration: element.duration, readyState: element.readyState, error: element.error?.message || null }));
+  assert.equal(audio.error, null);
+  if (audio.src.startsWith('data:audio/wav')) assert.ok(audio.readyState >= 1 && audio.duration > 0 && audio.duration < 0.1, `The silent unlock WAV must really decode: readyState=${audio.readyState}, duration=${audio.duration}`);
+}
+async function waitReceivedVoices(page, before, voiceIds) {
+  await page.waitForFunction(({ before, count }) => window.chatPlaybackEvents.length >= before.starts + count && window.chatEndedEvents.length >= before.ends + count,
+    { before, count: voiceIds.length }, { timeout: 20000 });
+  const received = await page.evaluate(start => window.chatPlaybackEvents.slice(start).map(event => event.src.split('/').at(-1)), before.starts);
+  assert.deepEqual(received, voiceIds.map(voiceId => voices[voiceId].filename), 'Every new received voice must play exactly once, in arrival order');
+}
+async function sendVoiceAndPlay(page, receiver, device, voiceId, receiveSound = true) {
   const gate = { replied: false };
   gate.promise = new Promise(resolve => { gate.release = resolve; });
   postGates.set(`${device}:${voiceId}`, gate);
-  const beforePosts = posts.length, beforeOwn = await playbackCount(page), beforeReceived = await playbackCount(receiver);
+  const beforePosts = posts.length, beforeOwn = await playbackCount(page), beforeReceived = await playbackSnapshot(receiver);
   const button = page.locator(`[data-chat-voice="${voiceId}"]`);
   let body;
   try {
@@ -140,15 +164,16 @@ async function sendVoiceAndPlay(page, receiver, device, voiceId) {
   await waitSent(page, body.requestId);
   await waitSent(receiver, body.requestId);
   assert.equal(await playbackCount(page), beforeOwn + 1, 'Cloud acknowledgement must not start the recording again');
-  assert.equal(await playbackCount(receiver), beforeReceived, 'Receiving another device\'s message must not autoplay');
+  if (receiveSound) await waitReceivedVoices(receiver, beforeReceived, [voiceId]);
+  else assert.equal(await playbackCount(receiver), beforeReceived.starts, 'A muted receiver must not play incoming voice messages');
   return body;
 }
-async function sendRapidVoices(page, receiver, device) {
+async function sendRapidVoices(page, receiver, device, muteAfterStart = false) {
   const sequence = ['too-slow', 'too-slow', 'too-slow', 'hurry-up'];
   const gate = { replied: false };
   gate.promise = new Promise(resolve => { gate.release = resolve; });
   for (const voiceId of Object.keys(voices)) postGates.set(`${device}:${voiceId}`, gate);
-  const beforePosts = posts.length, beforeReceived = await playbackCount(receiver);
+  const beforePosts = posts.length, beforeReceived = await playbackSnapshot(receiver);
   let pending;
   try {
     for (const voiceId of sequence) {
@@ -182,8 +207,17 @@ async function sendRapidVoices(page, receiver, device) {
     assert.equal(await row(receiver, message.requestId).count(), 1);
   }
   assert.deepEqual(posts.slice(beforePosts).map(message => message.requestId), pending.map(message => message.requestId), 'All rapid clicks must save in order without loss or extra requests');
-  assert.equal(await playbackCount(receiver), beforeReceived, 'Rapidly received voice messages must remain silent');
-  rapidClicks.push({ device, clicked: sequence.length, saved: pending.length, latestAudioBeforeQueueSaved: 'hurry-up' });
+  if (muteAfterStart) {
+    await receiver.waitForFunction(() => {
+      const audio = document.getElementById('chat-audio');
+      return audio.currentSrc.endsWith('/too-slow.m4a') && !audio.paused && audio.currentTime > 0.02;
+    });
+    await receiver.locator('#chat-sound-toggle').click();
+    assert.equal(await receiver.locator('#chat-sound-toggle').getAttribute('aria-pressed'), 'false');
+    assert.equal(await receiver.locator('#chat-audio').evaluate(audio => audio.paused), true, 'Muting must immediately stop the current received recording');
+    assert.equal(await playbackCount(receiver), beforeReceived.starts + 1);
+  } else await waitReceivedVoices(receiver, beforeReceived, sequence);
+  rapidClicks.push({ device, clicked: sequence.length, saved: pending.length, latestAudioBeforeQueueSaved: 'hurry-up', receiver: muteAfterStart ? 'muted during playback' : 'played all four in order' });
 }
 async function assertLayout(page) {
   const result = await page.evaluate(() => {
@@ -254,12 +288,16 @@ try {
   const page = await desktop.newPage(), phone = await mobile.newPage();
   for (const current of [page, phone]) {
     await current.goto(base, { waitUntil: 'domcontentloaded' });
+    await waitSent(current, hex(165));
+    assert.equal(await playbackCount(current), 0, 'Initial history containing voice messages must stay silent');
+    await current.locator('#chat-older').click();
     await waitSent(current, hex(101));
     assert.equal(await row(current, hex(101)).getAttribute('data-message-kind'), 'text', 'Old chat records remain ordinary text');
     assert.ok((await row(current, hex(101)).textContent()).includes('之前的聊天记录仍然保留。'));
     assert.deepEqual(await current.evaluate(() => [typeof AbortSignal.any, typeof AbortSignal.timeout]), ['undefined', 'undefined']);
     await assertLayout(current);
-    assert.equal(await playbackCount(current), 0, 'Loading existing history must not autoplay');
+    assert.equal(await playbackCount(current), 0, 'Loading older voice history must not autoplay');
+    await enableSound(current);
   }
   await page.locator('#chat-nickname').fill('桌边棋友');
   await phone.locator('#chat-nickname').fill('手机棋友');
@@ -305,7 +343,7 @@ try {
   assert.notEqual(longMessage.clientId, firstVoice.clientId);
   await waitSent(page, longMessage.requestId);
   for (const current of [page, phone]) {
-    assert.equal(await playbackCount(current), 2, 'Only the two locally clicked voice shortcuts may start playback');
+    assert.equal(await playbackCount(current), 4, 'Two local sends and two newly received recordings must each play once');
     assert.equal(await current.locator('#chat-audio').evaluate(audio => audio.paused), true);
     await assertLayout(current);
     await current.reload({ waitUntil: 'domcontentloaded' });
@@ -313,12 +351,89 @@ try {
     assert.equal(await playbackCount(current), 0, 'Reloading saved voice history must not autoplay');
     assert.equal(await row(current, longMessage.requestId).locator('.chat-text').textContent(), longText);
     assert.ok((await row(current, firstVoice.requestId).locator('.chat-meta').textContent()).includes('桌边棋友'));
+    await enableSound(current);
   }
   assert.equal(await page.locator('#chat-nickname').inputValue(), '改名后的棋友', 'Desktop nickname persists locally');
   assert.equal(await phone.locator('#chat-nickname').inputValue(), '手机棋友', 'Another device retains its own nickname');
 
   await sendRapidVoices(page, phone, 'desktop');
   await sendRapidVoices(phone, page, 'mobile');
+
+  // A separate tab shares the device ID, but only the sending tab should suppress
+  // its own server echo. The sibling must hear the new message once.
+  const sibling = await desktop.newPage();
+  await sibling.goto(base, { waitUntil: 'domcontentloaded' });
+  await waitSent(sibling, messages.at(-1).requestId);
+  assert.equal(await playbackCount(sibling), 0);
+  await enableSound(sibling);
+  const beforePhone = await playbackSnapshot(phone);
+  const siblingMessage = await sendVoiceAndPlay(page, sibling, 'desktop', 'too-slow');
+  assert.equal(siblingMessage.clientId, firstVoice.clientId);
+  assert.equal(await sibling.evaluate(() => localStorage.getItem('yijian:chat-client:v1')), siblingMessage.clientId);
+  await waitReceivedVoices(phone, beforePhone, ['too-slow']);
+  await sibling.close();
+
+  // Edge's automation environment can allow autoplay despite the policy flag.
+  // Simulate exactly one NotAllowedError here; recovery uses the real player.
+  const blockedContext = await prepare('blocked', { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await blockedContext.addInitScript(() => {
+    const realPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function (...args) {
+      if (!window.chatAutoplayBlockInjected && /\/assets\/voices\//.test(this.src)) {
+        window.chatAutoplayBlockInjected = true;
+        return Promise.reject(new DOMException('Autoplay blocked for this test', 'NotAllowedError'));
+      }
+      return realPlay.apply(this, args);
+    };
+  });
+  const blocked = await blockedContext.newPage();
+  await blocked.goto(base, { waitUntil: 'domcontentloaded' });
+  await waitSent(blocked, messages.at(-1).requestId);
+  const beforeBlocked = await playbackSnapshot(blocked);
+  const blockedMessage = await sendVoiceAndPlay(page, phone, 'desktop', 'hurry-up');
+  await waitSent(blocked, blockedMessage.requestId);
+  await blocked.waitForFunction(() => document.getElementById('chat-sound-hint').textContent.includes('浏览器'));
+  assert.equal(await blocked.evaluate(() => window.chatAutoplayBlockInjected), true);
+  assert.equal(await playbackCount(blocked), beforeBlocked.starts);
+  assert.equal(await blocked.locator('#chat-sound-toggle').getAttribute('aria-pressed'), 'false');
+  await enableSound(blocked);
+  await waitReceivedVoices(blocked, beforeBlocked, ['hurry-up']);
+  await blockedContext.close();
+
+  // Hold the real media response while a permitted remote play is loading.
+  // Clicking enable must preserve that recording rather than replace it with WAV.
+  const loadingContext = await prepare('loading', { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  let releaseMedia, heldMediaRequests = 0;
+  const mediaGate = new Promise(resolve => { releaseMedia = resolve; });
+  await loadingContext.route(url => url.pathname.endsWith('/assets/voices/too-slow.m4a'), async route => {
+    heldMediaRequests++;
+    await mediaGate;
+    await route.continue();
+  });
+  try {
+    const loading = await loadingContext.newPage();
+    await loading.goto(base, { waitUntil: 'domcontentloaded' });
+    await waitSent(loading, messages.at(-1).requestId);
+    await loading.locator('#chat-nickname').click();
+    const beforeLoading = await playbackSnapshot(loading);
+    const loadingMessage = await sendVoiceAndPlay(page, phone, 'desktop', 'too-slow');
+    await waitSent(loading, loadingMessage.requestId);
+    assert.ok(heldMediaRequests > 0, 'The remote recording must be loading behind the media gate');
+    assert.equal(await loading.locator('#chat-sound-toggle').getAttribute('aria-pressed'), 'false');
+    await loading.locator('#chat-sound-toggle').click();
+    releaseMedia();
+    await waitReceivedVoices(loading, beforeLoading, ['too-slow']);
+    assert.equal(await loading.locator('#chat-sound-toggle').getAttribute('aria-pressed'), 'true');
+  } finally { releaseMedia(); await loadingContext.close(); }
+
+  // Muting stops the current received clip and discards the remaining queue.
+  await sendRapidVoices(page, phone, 'desktop', true);
+  const mutedCount = await playbackCount(phone);
+  await sendVoiceAndPlay(page, phone, 'desktop', 'too-slow', false);
+  assert.equal(await playbackCount(phone), mutedCount, 'New messages arriving while muted must be skipped');
+  await enableSound(phone);
+  assert.equal(await playbackCount(phone), mutedCount, 'Re-enabling sound must not replay the discarded queue');
+  await sendVoiceAndPlay(page, phone, 'desktop', 'hurry-up');
 
   const playback = [];
   for (const message of [firstVoice, secondVoice]) {
@@ -351,6 +466,6 @@ try {
   await page.locator('#chat-panel').screenshot({ path: '.artifacts/chat-voice-card-desktop.png' });
   await phone.locator('#chat-panel').screenshot({ path: '.artifacts/chat-voice-card-mobile.png' });
   console.log(JSON.stringify({ result: 'Voice chat browser checks passed', base, mockedApiOnly: true, actualAudio: true,
-    sentMessages: posts.length, immediatePlayback, rapidClicks, playback, checked: ['legacy history', 'voice mapping', 'nickname snapshots/local persistence', 'text quick phrases', '500-character cross-device history', 'draft retention', 'shortcut playback before POST confirmation', 'rapid repeated/switching voice clicks while saves queued', 'no received/history autoplay', 'real audio playback/replay', 'single-player switching', '320/390/540/768px layout', 'missing AbortSignal statics', 'page errors'],
+    sentMessages: posts.length, immediatePlayback, rapidClicks, playback, checked: ['legacy history', 'voice mapping', 'nickname snapshots/local persistence', 'text quick phrases', '500-character cross-device history', 'draft retention', 'shortcut playback before POST confirmation', 'rapid repeated/switching voice clicks while saves queued', 'new received voices play in order', 'initial/older/reload history stays silent', 'same-client other-tab playback', 'simulated NotAllowedError with real click recovery', 'enable during real media loading preserves recording', 'mute stops/clears/skips incoming voices', 'real audio playback/replay', 'single-player switching', '320/390/540/768px layout', 'missing AbortSignal statics', 'page errors'],
     screenshots: ['chat-voice-desktop.png', 'chat-voice-mobile.png', 'chat-voice-card-desktop.png', 'chat-voice-card-mobile.png'] }));
 } finally { await browser.close(); }

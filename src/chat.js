@@ -4,6 +4,9 @@ import { CHAT_VOICES } from './chat-voices.js';
 
 const CLIENT_KEY = 'yijian:chat-client:v1';
 const NICKNAME_KEY = 'yijian:chat-nickname:v1';
+const SOUND_KEY = 'yijian:chat-muted:v1';
+// 40 ms of silent PCM audio. Play on the same element in a real user gesture.
+const SILENT_AUDIO = 'data:audio/wav;base64,UklGRmQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YUABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
 const idPattern = /^[a-f0-9]{32}$/i;
 const voiceClip = id => typeof id === 'string' && Object.prototype.hasOwnProperty.call(CHAT_VOICES, id) ? CHAT_VOICES[id] : null;
 const normalizeMessage = message => ({ ...message, kind: message.kind ?? 'text', voiceId: message.voiceId ?? null, nickname: message.nickname ?? '' });
@@ -45,12 +48,17 @@ function createChat(panel, api) {
   const log = $('chat-messages'), input = $('chat-input'), nickname = $('chat-nickname'), audio = $('chat-audio'), clientId = deviceId();
   try { nickname.value = (localStorage.getItem(NICKNAME_KEY) || '').slice(0, 24); } catch { /* Nicknames still work for this visit. */ }
   const messages = new Map(), pending = new Map(), outbox = [], listeners = [];
+  // This page's sends only: another tab may share our clientId and must still be heard.
+  const sentHere = new Set(), incomingVoices = [];
+  let soundMuted = false, soundReady = false, soundBlocked = false, playbackRemote = false;
+  try { soundMuted = localStorage.getItem(SOUND_KEY) === '1'; } catch { /* Use this visit's preference. */ }
   let online = false, initialized = false, connectionError = '', destroyed = false, suspended = false;
   let reading = null, sending = false, loadingOlder = false, wantsOlder = false;
   let oldest = null, cursor = 0, hasOlder = false, unread = 0, sequence = 0, composing = false;
-  let hasSent = false, playbackError = '', playbackKey = null, playbackState = 'idle', playbackVersion = 0;
+  let hasSent = false, playbackError = '', playbackKey = null, playbackVoiceId = null, playbackState = 'idle', playbackVersion = 0;
   const connected = () => navigator.onLine !== false;
-  const available = () => !destroyed && !suspended && connected() && !document.hidden;
+  const chatActive = () => !suspended && (!document.hidden || !soundMuted);
+  const available = () => !destroyed && connected() && chatActive();
   const bind = (target, event, handler) => { target.addEventListener(event, handler); listeners.push(() => target.removeEventListener(event, handler)); };
   const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 36;
   const setText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
@@ -71,6 +79,12 @@ function createChat(panel, api) {
     $('chat-error').classList.toggle('hidden', !playbackError && !connectionError);
     $('chat-new').classList.toggle('hidden', !unread);
     setText($('chat-new'), unread ? `${unread} 条新消息 ↓` : '有新消息 ↓');
+    const audible = !soundMuted && soundReady && !soundBlocked;
+    setText($('chat-sound-toggle'), audible ? '声音已开启' : '开启声音');
+    $('chat-sound-toggle').setAttribute('aria-pressed', String(audible));
+    $('chat-sound-toggle').setAttribute('aria-label', audible ? '关闭接收语音的声音' : '开启接收语音的声音');
+    setText($('chat-sound-hint'), soundMuted ? '已静音，点击开启后接收新语音。' : soundBlocked ?
+      '浏览器暂未允许出声，请点击开启声音。' : audible ? '其他设备发送语音时，这里也会播放。' : '每台设备点一次，接收其他设备的声音。');
   }
   function updateVoiceButtons() {
     log.querySelectorAll('[data-chat-play]').forEach(button => {
@@ -82,34 +96,82 @@ function createChat(panel, api) {
     });
   }
   function stopPlayback() {
-    playbackVersion++; playbackKey = null; playbackState = 'idle';
+    playbackVersion++; playbackKey = null; playbackVoiceId = null; playbackState = 'idle';
+    playbackRemote = false;
     audio.pause();
     try { audio.currentTime = 0; } catch { /* No metadata has loaded yet. */ }
     updateVoiceButtons();
   }
-  function playVoice(voiceId, key) {
+  function drainIncoming() {
+    if (destroyed || suspended || soundMuted || soundBlocked || playbackState !== 'idle') return;
+    const next = incomingVoices.shift();
+    if (next) playVoice(next.voiceId, next.key, true);
+  }
+  function playVoice(voiceId, key, remote = false) {
     const clip = voiceClip(voiceId);
     if (!clip || !key) return;
-    if (playbackKey === key && playbackState !== 'idle') { stopPlayback(); return; }
+    if (playbackKey === key && playbackState !== 'idle') { stopPlayback(); drainIncoming(); return; }
     const version = ++playbackVersion;
-    audio.pause(); playbackKey = key; playbackState = 'loading'; playbackError = '';
+    audio.pause(); playbackKey = key; playbackVoiceId = voiceId; playbackState = 'loading'; playbackError = '';
+    playbackRemote = remote;
     const source = new URL(`../assets/voices/${clip.file}`, import.meta.url).href;
     if (audio.src !== source) audio.src = source;
+    else if (audio.error) audio.load();
     try { audio.currentTime = 0; } catch { /* play() loads the supplied recording. */ }
     updateVoiceButtons(); updateControls();
-    const failed = () => {
+    const failed = error => {
       if (version !== playbackVersion || destroyed) return;
-      playbackKey = null; playbackState = 'idle';
-      playbackError = '语音暂时无法播放，请检查网络后点击重试。';
+      playbackKey = null; playbackVoiceId = null; playbackState = 'idle'; playbackRemote = false;
+      if (error?.name === 'NotAllowedError') {
+        soundBlocked = true; soundReady = false;
+        if (remote && !soundMuted) incomingVoices.unshift({ voiceId, key });
+      } else playbackError = '语音暂时无法播放，请检查网络后点击重试。';
       updateVoiceButtons(); updateControls();
+      drainIncoming();
     };
     try {
       // Calling play synchronously in this click handler preserves the user gesture.
       Promise.resolve(audio.play()).then(() => {
         if (version !== playbackVersion || destroyed) return;
-        playbackState = 'playing'; updateVoiceButtons();
+        playbackState = 'playing'; soundReady = true; soundBlocked = false;
+        updateVoiceButtons(); updateControls();
+      }, failed);
+    } catch (error) { failed(error); }
+  }
+  function enableSound() {
+    soundMuted = false; soundBlocked = false; playbackError = '';
+    try { localStorage.setItem(SOUND_KEY, '0'); } catch { /* Keep the preference in memory. */ }
+    if (playbackState === 'playing') { soundReady = true; updateControls(); return; }
+    soundReady = false;
+    // A loading remote message has already left the queue; retry it in this gesture.
+    const next = playbackRemote && playbackKey ? { voiceId: playbackVoiceId, key: playbackKey } : incomingVoices.shift();
+    stopPlayback();
+    if (next) { playVoice(next.voiceId, next.key, true); return; }
+    const version = ++playbackVersion;
+    playbackState = 'unlocking';
+    audio.src = SILENT_AUDIO;
+    updateControls();
+    const failed = () => {
+      if (version !== playbackVersion || destroyed) return;
+      playbackState = 'idle'; soundReady = false; soundBlocked = true;
+      updateControls();
+    };
+    try {
+      Promise.resolve(audio.play()).then(() => {
+        if (version !== playbackVersion || destroyed) return;
+        playbackState = 'idle'; soundReady = true; soundBlocked = false;
+        audio.pause(); updateControls(); drainIncoming();
       }, failed);
     } catch { failed(); }
+  }
+  function toggleSound() {
+    if (!soundMuted && soundReady && !soundBlocked) {
+      soundMuted = true; incomingVoices.length = 0;
+      try { localStorage.setItem(SOUND_KEY, '1'); } catch { /* Keep the preference in memory. */ }
+      if (playbackRemote) stopPlayback();
+      updateControls();
+    } else enableSound();
+    if (chatActive()) auto.wake(); else auto.stop();
   }
   function captureScroll() {
     const top = log.getBoundingClientRect().top;
@@ -175,11 +237,17 @@ function createChat(panel, api) {
     }
     updateVoiceButtons(); updateControls();
   }
-  function merge(incoming) {
+  function merge(incoming, live = false) {
     let additions = 0, changed = false;
     for (const raw of incoming) {
       const message = normalizeMessage(raw);
-      if (!messages.has(message.id)) { messages.set(message.id, message); additions++; changed = true; }
+      if (!messages.has(message.id)) {
+        messages.set(message.id, message); additions++; changed = true;
+        const key = `${message.clientId}:${message.requestId}`;
+        if (live && !soundMuted && message.kind === 'voice' && !sentHere.has(key)) {
+          incomingVoices.push({ voiceId: message.voiceId, key });
+        }
+      }
       if (message.clientId === clientId && pending.delete(message.requestId)) { hasSent = true; changed = true; additions = Math.max(0, additions - 1); }
     }
     return { additions, changed };
@@ -201,7 +269,7 @@ function createChat(panel, api) {
           !data.messages.every((message, index) => validMessage(message) && (!index || data.messages[index - 1].id < message.id) &&
             (before === null || message.id < before) && (after === null || message.id > after))) throw new Error('聊天记录格式不正确，请稍后重试。');
       if (data.hasMoreAfter && !data.messages.length) throw new Error('聊天记录分页异常，请稍后重试。');
-      const merged = merge(data.messages);
+      const merged = merge(data.messages, !initial && before === null);
       if (initial || before !== null) {
         hasOlder = data.hasMoreBefore;
         if (data.messages.length) oldest = data.messages[0].id;
@@ -211,6 +279,7 @@ function createChat(panel, api) {
       initialized = true; online = true; connectionError = '';
       moreAfter = before === null && data.hasMoreAfter;
       if (merged.changed || initial) render({ additions: merged.additions, older: before !== null, firstLoad: initial });
+      drainIncoming();
     } catch (error) {
       if (!controller.signal.aborted && !destroyed) { online = false; connectionError = error.message || '聊天连接失败，请稍后重试。'; }
     } finally {
@@ -255,6 +324,7 @@ function createChat(panel, api) {
     const value = text.trim();
     if (!value || value.length > 500 || destroyed || voiceId !== null && !voiceClip(voiceId)) return;
     const requestId = randomId();
+    if (voiceId) sentHere.add(`${clientId}:${requestId}`);
     pending.set(requestId, { clientId, requestId, text: value, kind: voiceId ? 'voice' : 'text', voiceId,
       nickname: nickname.value.trim().slice(0, 24), createdAt: new Date().toISOString(), status: 'sending', sequence: sequence++ });
     if (clearInput) input.value = '';
@@ -262,7 +332,8 @@ function createChat(panel, api) {
     return requestId;
   }
   const auto = createAutoRefresh({ refresh, getState: () => ({ online, refreshing: !!reading, busy: false }),
-    isVisible: () => !document.hidden && !suspended, isConnected: connected });
+    isVisible: chatActive, isConnected: connected });
+  bind($('chat-sound-toggle'), 'click', toggleSound);
   bind($('chat-form'), 'submit', event => { event.preventDefault(); if (!composing) send(input.value, true); });
   bind(input, 'input', updateControls);
   const saveNickname = () => { try { localStorage.setItem(NICKNAME_KEY, nickname.value.slice(0, 24)); } catch { /* The current nickname remains usable. */ } };
@@ -300,19 +371,29 @@ function createChat(panel, api) {
   bind($('chat-older'), 'click', () => { if (!hasOlder) return; wantsOlder = true; updateControls(); if (!reading) void refresh(); });
   bind($('chat-new'), 'click', () => { log.scrollTop = log.scrollHeight; unread = 0; updateControls(); });
   bind(log, 'scroll', () => { if (unread && atBottom()) { unread = 0; updateControls(); } });
-  bind(document, 'visibilitychange', () => { if (document.hidden) auto.stop(); else auto.wake(); });
+  bind(document, 'visibilitychange', () => { if (chatActive()) { auto.wake(); drainIncoming(); } else auto.stop(); });
   bind(window, 'focus', () => auto.wake());
   bind(window, 'online', () => auto.wake());
   bind(window, 'pagehide', () => { suspended = true; auto.stop(); stopPlayback(); });
-  bind(window, 'pageshow', event => { if (event.persisted) { suspended = false; auto.wake(); } });
+  bind(window, 'pageshow', event => { if (event.persisted) { suspended = false; auto.wake(); drainIncoming(); } });
   bind(window, 'offline', () => { auto.stop(); reading?.abort(); online = false; connectionError = '设备已离线，已显示的消息仍可查看。'; updateControls(); });
-  bind(audio, 'ended', () => { playbackVersion++; playbackKey = null; playbackState = 'idle'; updateVoiceButtons(); });
-  bind(audio, 'pause', () => { if (audio.paused && playbackState === 'playing') { playbackState = 'idle'; updateVoiceButtons(); } });
+  bind(audio, 'ended', () => {
+    if (!audio.ended || playbackState === 'unlocking') return;
+    playbackVersion++; playbackKey = null; playbackVoiceId = null; playbackState = 'idle'; playbackRemote = false;
+    updateVoiceButtons(); drainIncoming();
+  });
+  bind(audio, 'pause', () => {
+    if (audio.paused && !audio.ended && playbackState === 'playing') {
+      playbackVersion++; playbackKey = null; playbackVoiceId = null; playbackState = 'idle'; playbackRemote = false;
+      soundReady = false; soundBlocked = true;
+      updateVoiceButtons(); updateControls();
+    }
+  });
   bind(audio, 'error', () => {
-    if (!playbackKey || destroyed) return;
-    playbackVersion++; playbackKey = null; playbackState = 'idle';
+    if (!audio.error || !playbackKey || destroyed) return;
+    playbackVersion++; playbackKey = null; playbackVoiceId = null; playbackState = 'idle'; playbackRemote = false;
     playbackError = '语音暂时无法播放，请检查网络后点击重试。';
-    updateVoiceButtons(); updateControls();
+    updateVoiceButtons(); updateControls(); drainIncoming();
   });
   updateControls(); void refresh(); auto.start();
   return { refresh, destroy() { destroyed = true; auto.stop(); reading?.abort(); stopPlayback(); listeners.forEach(remove => remove()); } };
